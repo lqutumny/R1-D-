@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 运行产物（报告、CSV、截图、仿真日志）
+out/
+*.log
+MUJOCO_LOG.TXT
+
+# 崩溃转储
+core
+core.*
+
+# 编辑器 / 环境
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
