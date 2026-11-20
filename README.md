@@ -78,9 +78,9 @@ bash run_fault_tests.sh          # 保护项注入测试（约 100 s，29 项）
 `run_demo.sh` 会自己拉起 MuJoCo 仿真器、等它就绪、跑控制器、收尾关窗。期望输出：
 
 ```
-阶段： startup-hold(0.0s) → approach(2.0s) → scan-up(9.9s) → scan-down(24.2s)
-       → return(38.6s) → finished-hold(46.5s)
-指令 1.5 万条，最大跟踪误差 0.05 rad，complete=True
+阶段： startup-hold(0.0s) → approach(2.0s) → scan-up(10.7s) → scan-down(26.5s)
+       → return(42.2s) → finished-hold(50.9s)
+指令 2.3 万条，最大跟踪误差 0.03 rad，complete=True
 最终关节角(deg)： [10.0, 0.0, 0.0, 60.0, 0.0, 0.0, 0.0]
 ```
 
@@ -89,7 +89,7 @@ bash run_fault_tests.sh          # 保护项注入测试（约 100 s，29 项）
 ## 工作原理（三段）
 
 1. **规划**：`scan_plan.py` 用 `kinematics.py` 把"探头端面沿竖直线走 50 cm"翻译成 7 个关节的角度序列
-   （101 个节点），再用 `path_timing.py` 给它打时间戳（单程 14.35 s）。
+   （101 个节点），再用 `path_timing.py` 给它打时间戳（单程 15.73 s）。
 2. **控制**：`scan.py` 按 2 ms 周期把关节角写进 `rt/lowcmd`（HG 协议，含 CRC），
    同时订阅 `rt/lowstate` 拿实测角做闭环。状态机：保持 → 接近 → 上行 → 下行 → 回位 → 保持。
 3. **仿真**：`sim.py` 就是这个"机器人"——它订阅 `rt/lowcmd`，按 PD 力矩驱动 MuJoCo，发布 `rt/lowstate`。
@@ -112,11 +112,11 @@ bash run_fault_tests.sh          # 保护项注入测试（约 100 s，29 项）
 
 | 项 | 现状 | 说明 |
 |---|---|---|
-| 探头模型 | Ø70×120 假圆柱 / 1.5 kg | 真件 STEP 已量出外廓，缺安装面、探测面与质量 |
-| 指令频率 | 345–410 Hz | 虚拟机 `time.sleep` 粒度所限；原生 Linux 预期接近 500 Hz |
+| 探头模型 | 真件 126×126×190、探测面 Ø47、1.5 kg | 质量与质心仍是估值，真件称重后重跑 |
+| 指令频率 | 345–440 Hz | 虚拟机 `time.sleep` 粒度所限；原生 Linux 预期接近 500 Hz |
 | 力矩预算 | URDF effort × 0.9 | 真机应换成厂商连续力矩 + 实测温升 |
 | 腰 yaw | 不由本程序控制 | 官方 A7 示例不驱动腰，槽位（12/13）待实测 |
-| 精度 | 仿真 0.57 mm / 0.28° | 真机按 20 mm / 10° 验收，绝对位置 ≤100 mm |
+| 精度 | 仿真 0.19 mm / 0.06° | 真机按 20 mm / 10° 验收，绝对位置 ≤100 mm |
 
 ## 文档索引
 

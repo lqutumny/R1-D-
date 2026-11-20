@@ -2,7 +2,7 @@
   "source_urdf": "r1_a7.urdf",
   "scene": "r1_a7_scene.xml",
   "base_z_m": 1.0,
-  "wall_x_m": 0.75,
+  "wall_x_m": 0.7,
   "controlled_joints": [
     "left_shoulder_pitch_joint",
     "left_shoulder_roll_joint",
@@ -35,15 +35,18 @@
   },
   "fixed": "右臂、头、相机（fixed 关节）；底盘/升降柱不建模",
   "probe": {
-    "length_m": 0.25,
+    "length_m": 0.19,
+    "width_m": 0.126,
+    "face_diameter_m": 0.047,
     "mass_kg": 1.5,
-    "radius_m": 0.035,
+    "com_from_flange_m": 0.095,
     "axis_local": [
       1,
       0,
       0
     ],
-    "note": "沿腕部局部 +x（零位前臂方向）；等 B1 支架图纸再按实际安装面修正"
+    "source": "SolidWorks 实测：本体 126×126×190、探测面 Ø47、质量按 1.5 kg",
+    "note": "沿腕部局部 +x（零位前臂方向），正装；法兰 70×70×6 未单独建模"
   },
   "effort_limit_Nm": {
     "left_shoulder_pitch_joint": 60.0,
@@ -62,7 +65,7 @@
     "right_wrist_yaw_joint": 10.0
   },
   "torque_check": {
-    "probe_static_Nm_at_wrist": 1.84
+    "probe_static_Nm_at_wrist": 1.4
   },
   "nq": 17,
   "nv": 17,

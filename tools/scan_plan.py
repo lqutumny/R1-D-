@@ -102,7 +102,9 @@ def main():
             break
     if sol.position_error > 1e-3:
         raise SystemExit(f"首点 IK 失败：位置 {sol.position_error*1000:.2f} mm")
-    qs = kin.follow_line(points, axis_target, sol.q, active=active, joint_weights=weights)
+    # iters 从默认 6 提到 15：换探头后首段步长变大，6 次迭代收敛到 1.02 mm 就停了
+    qs = kin.follow_line(points, axis_target, sol.q, active=active, joint_weights=weights,
+                         iters=15)
 
     errors, margins, bindings = [], [], []
     for i, q in enumerate(qs):

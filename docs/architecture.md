@@ -44,8 +44,8 @@
 |---|---|---|
 | `startup-hold` | 2.0 s | 保持捕获到的姿态（等链路稳定） |
 | `approach` | 4–8 s（按限速/限加速度反算） | 五次曲线从初始姿态过渡到扫描起点 |
-| `scan-up` | 14.35 s | 探头端面从 z=0.92 m 走到 1.42 m |
-| `scan-down` | 14.35 s | 原路返回 |
+| `scan-up` | 15.73 s | 探头端面从 z=0.92 m 走到 1.42 m |
+| `scan-down` | 15.73 s | 原路返回 |
 | `return` | 同 approach | 五次曲线回到初始姿态 |
 | `finished-hold` | 2.0 s（`--hold`） | 保持，然后退出 |
 
@@ -86,7 +86,7 @@ runner.step(state, now)
 ## 6. 规划链
 
 ```
-docs/workspace.md 站位卡（箱面 0.75 m、站距 0.20 m、可扫 z 0.92–1.42）
+docs/workspace.md 站位卡（箱面 0.70 m、站距 0.20 m、可扫 z 0.92–1.48）
         │
         ▼  tools/scan_workspace.py   可达性扫描（关节余量、奇异、离箱面距离）
         ▼  tools/scan_plan.py        IK 逐点推进 → 101 点关节角 + 时间参数化

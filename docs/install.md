@@ -63,8 +63,8 @@ bash tools/fetch_urdf.sh        # 下载官方 URDF 到 /tmp
 URDF 拷到 `models/`、mesh 拷到 `models/meshes/` 后，重建场景：
 
 ```bash
-python3 tools/build_scene.py --base-z 1.0 --wall-x 0.75 \
-        --probe-len 0.25 --probe-mass 1.5 --probe-radius 0.035
+python3 tools/build_scene.py --base-z 1.0 --wall-x 0.70 \
+        --probe-len 0.19 --probe-width 0.126 --probe-face-r 0.0235 --probe-mass 1.5
 python3 tools/tune_gains.py --write      # 按目标阻尼比写回关节阻尼
 ```
 
