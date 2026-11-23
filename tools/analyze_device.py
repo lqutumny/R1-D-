@@ -53,10 +53,14 @@ def main():
     print(f"  电机信号槽位：{[r['slot'] for r in motor]}")
     print(f"  仅供电槽位：{[r['slot'] for r in power]}")
 
-    slot_names = {}
+    slot_names, slot_roles = {}, {}
     if args.profile:
         profile = load_profile(args.profile)
         slot_names = {slot: name for name, slot in profile.slot_map().items()}
+        slot_roles = {slot: "左臂（本程序控制）" for slot in profile.slot_map().values()}
+        for joint in getattr(profile, "hold_joints", ()):
+            slot_names[joint.slot] = joint.name
+            slot_roles[joint.slot] = "右臂（本程序写固定值保持）"
         if not slot_names:
             print("profile 里还没有已确认的槽位映射，本次只输出待填草稿。")
 
@@ -97,7 +101,8 @@ def main():
         limit = limits.get(name)
         window = (f"{limit['lower']*57.2958:+.1f} ~ {limit['upper']*57.2958:+.1f}"
                   if limit else "（待填）")
-        lines.append(f"| {name or '（待填）'} | {row['slot']} | （待填） | {window} | （待填） | （待填） |")
+        lines.append(f"| {name or '（待填）'} | {row['slot']} | （待填） | {window} | （待填） | "
+                     f"{slot_roles.get(row['slot'], '（待填）')} |")
     lines += ["", "当前姿态实测（关节坐标系原始值）：", "",
               "| 槽位 | q(deg) | dq | tau(N·m) | temp(°C) | error |",
               "|---|---|---|---|---|---|"]

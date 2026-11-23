@@ -28,6 +28,7 @@ r1d_radiate_scan/
 │   ├── architecture.md       # 代码结构、数据流、控制回路、如何扩展
 │   ├── device.md             # 机型事实：关节、限位、effort、DDS 槽位、右臂保持做法
 │   ├── workspace.md          # 站位卡、可扫 z 范围、轨迹指标
+│   ├── joint_map.md          # 阶段 5a 现场作业单：六列表怎么填、三条硬标准
 │   └── faults.md             # 保护项清单 + 注入测试证据
 ├── models/
 │   ├── r1_a7.urdf            # 官方 R1-A7 URDF（unitree_ros）
@@ -57,7 +58,7 @@ r1d_radiate_scan/
 │   ├── check_urdf.py         # URDF 自检
 │   ├── measure_step.py       # 从 STEP 文件量探头外形（不需要 CAD）
 │   ├── fault_injection.py    # 保护项注入测试（三层）
-│   ├── inspect_device.py     # 真机只读采集（不建 publisher）
+│   ├── inspect_device.py     # 真机只读采集（窗口内统计；不 import 任何 publisher）
 │   ├── analyze_device.py     # 采集结果 → 六列对照表草稿
 │   └── fetch_urdf.sh         # 官方 URDF 下载脚本（记录模型来源）
 ├── run_demo.sh               # 一条命令跑完整一轮（仿真）
@@ -127,6 +128,8 @@ bash run_fault_tests.sh          # 保护项注入测试（约 100 s，29 项）
 | 代码怎么组织、想改哪里 | [`docs/architecture.md`](docs/architecture.md) |
 | 机型参数、槽位、右臂怎么保持 | [`docs/device.md`](docs/device.md) |
 | 站位、可达范围、轨迹指标 | [`docs/workspace.md`](docs/workspace.md) |
+| 探头怎么装的、实测尺寸 | [`docs/device.md`](docs/device.md) §7 |
+| 真机核对怎么一步步做 | [`docs/joint_map.md`](docs/joint_map.md) |
 | 保护项怎么测的、停多快 | [`docs/faults.md`](docs/faults.md) |
 
 ## 数据来源
