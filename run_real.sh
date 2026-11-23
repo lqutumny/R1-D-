@@ -17,14 +17,14 @@ STAMP=$(date +%H%M%S)
 REPORT="out/real_${STAMP}.json"
 LOG="out/real_${STAMP}.csv"
 
-echo "=== 0/4 现场检查 ==="
+echo "=== 0/5 现场检查 ==="
 echo "  · 机器人周围 1 m 内无人、无遮挡"
 echo "  · 急停在手边（现场负责人）"
 echo "  · 机器人已进入低层模式（遥控器）"
 printf "  按回车继续，Ctrl-C 中止…… "
 read -r _
 
-echo "=== 1/4 检查指令通道（只读）==="
+echo "=== 1/5 检查指令通道（只读）==="
 python3 tools/watch_lowcmd.py --network "$NETWORK" --domain "$DOMAIN" --seconds 3 || exit 1
 if ! python3 -c "
 import json,sys
@@ -36,16 +36,23 @@ sys.exit(0 if d['packets']==0 else 1)
     exit 2
 fi
 
-echo "=== 2/4 抓取确认（14 槽位按住实测姿态 7 s，不动作）==="
+echo "=== 2/5 预检（只规划，不发指令）==="
+python3 r1d_scan/scan.py --network "$NETWORK" --domain "$DOMAIN" --dry-run \
+    --passes "$PASSES" --report "out/preflight_${STAMP}.json" || {
+    echo "预检不通过 → 一条运动指令都不发，退出。报告：out/preflight_${STAMP}.json"
+    exit 1
+}
+
+echo "=== 3/5 抓取确认（14 槽位按住实测姿态 7 s，不动作）==="
 python3 tools/nudge.py --network "$NETWORK" --domain "$DOMAIN" \
     --joint left_elbow_joint --amplitude-deg 0 --log out/grab_${STAMP}.csv || exit 1
 
-echo "=== 3/4 扫描 $PASSES 趟（每趟约 86 s）==="
+echo "=== 4/5 扫描 $PASSES 趟（每趟约 65 s）==="
 python3 r1d_scan/scan.py --network "$NETWORK" --domain "$DOMAIN" \
     --passes "$PASSES" --report "$REPORT" --log "$LOG"
 STATUS=$?
 
-echo "=== 4/4 汇总 ==="
+echo "=== 5/5 汇总 ==="
 if [ -f "$REPORT" ]; then
     python3 tools/check_run.py "$LOG" 2>/dev/null | head -14
     python3 - <<EOF

@@ -77,10 +77,13 @@ r1d_radiate_scan/
 环境见 [`docs/install.md`](docs/install.md)。装好后：
 
 ```bash
-bash run_demo.sh                 # 仿真里跑完整一轮（约 86 s，弹窗口）
-bash run_fault_tests.sh          # 保护项注入测试（约 110 s，30 项）
-bash run_real.sh                 # 真机：现场检查 → 抓取 → 扫描 → 汇总
+bash run_demo.sh                 # 仿真里跑完整一轮（约 70 s，弹窗口）
+bash run_fault_tests.sh          # 保护项注入测试（约 110 s，20 项）
+bash run_real.sh                 # 真机：现场检查 → 预检 → 抓取 → 扫描 → 汇总
 PASSES=3 bash run_real.sh        # 真机连扫 3 趟
+
+# 只预检不动：用机器人实测姿态把整轮时间轴离线走一遍，一条指令都不发
+python3 r1d_scan/scan.py --network ens33 --domain 0 --dry-run --report out/pre.json
 ```
 
 `run_demo.sh` 会自己拉起 MuJoCo 仿真器、等它就绪、跑控制器、收尾关窗。期望输出：
@@ -97,7 +100,7 @@ PASSES=3 bash run_real.sh        # 真机连扫 3 趟
 ## 工作原理（三段）
 
 1. **规划**：`scan_plan.py` 用 `kinematics.py` 把"探头端面沿竖直线走 50 cm"翻译成 7 个关节的角度序列
-   （101 个节点），再用 `path_timing.py` 给它打时间戳（单程 15.73 s）。
+   （101 个节点），再用 `path_timing.py` 给它打时间戳（单程 21.6 s，运行时约 24.6 s）。
 2. **控制**：`scan.py` 按 2 ms 周期把关节角写进 `rt/lowcmd`（HG 协议，含 CRC），
    同时订阅 `rt/lowstate` 拿实测角做闭环。状态机：保持 → 接近 → 上行 → 下行 → 回位 → 保持。
 3. **仿真**：`sim.py` 就是这个"机器人"——它订阅 `rt/lowcmd`，按 PD 力矩驱动 MuJoCo，发布 `rt/lowstate`。
@@ -108,8 +111,10 @@ PASSES=3 bash run_real.sh        # 真机连扫 3 趟
 
 ## 真机安全声明
 
-- `robot_profile.json` 的 `slot_source` 目前是 `provisional`（暂定槽位）。
-  `scan.py` 在**非 `lo` 网卡**上启动时会检查这一项，未核对就直接退出，**一条指令都不会发**。
+- `robot_profile.json` 的 `slot_source` 现为 `verified`（槽位已在真机只读核对过）。
+  `scan.py` 在**非 `lo` 网卡**上仍会检查这一项，未核对就直接退出，**一条指令都不会发**。
+- `--dry-run` 是同一份代码的"只规划"模式：用机器人实测姿态把整轮时间轴离线走完，
+  报告里 `published_commands` 恒为 0。`run_real.sh` 已把它放在抓取之前做闸门。
 - 真机前必须完成只读核对（`tools/inspect_device.py` 只订阅 `rt/lowstate`，不含任何 publisher）：
   槽位归属、关节方向、限位、`mode_machine`、腰 yaw 的槽位。
 - 保护触发时的行为是**停止发送、不清零 KP/KD**（机器人保持最后一条指令），不是急停。
@@ -124,8 +129,8 @@ PASSES=3 bash run_real.sh        # 真机连扫 3 趟
 | 指令频率 | 309–350 Hz | 虚拟机 `time.sleep` 粒度所限；原生 Linux 预期接近 500 Hz |
 | 力矩预算 | URDF effort × 0.9 | 真机 `tau_est` 实测近 0，只有"预计力矩"有效 |
 | 左腕 pitch 限位 | **±43°（实测硬限位）** | URDF 的 ±92.5° 作废；决定站位与速度 |
-| 扫描速度 | 0.014 m/s | 低于 0.02–0.05；腕限位收窄 + 为平滑降加速度所致 |
-| 精度 | 真机 4.8 mm 直线度 / 5.8° 轴线 | 绝对定位未测（用户判定无需） |
+| 扫描速度 | **规划 0.023 m/s / 运行 0.020 m/s** | 已进入 0.02–0.05 区间下沿（柔顺版轨迹） |
+| 精度 | 真机 4.8 mm / 5.8°（**旧轨迹**）；新柔顺版规划 1.75 mm / 0.58°，待真机复测 | 绝对定位未测（用户判定无需） |
 | 重复性 | 三轮散差 2.9 mm | 通过 |
 
 ## 文档索引

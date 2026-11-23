@@ -687,10 +687,11 @@ def main():
     out["passed"] = sum(1 for item in every if item.get("status") == "通过")
     out["total"] = len(every)
     out["seconds"] = round(time.monotonic() - t_start, 1)
+    args.report = args.report.resolve()   # 允许传相对路径，报告行不再因 pathlib 严格检查而崩
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     echo(f"\n合计 {out['passed']}/{out['total']} 通过，用时 {out['seconds']} s，"
-         f"报告 {args.report.relative_to(ROOT)}")
+         f"报告 {args.report.relative_to(ROOT) if ROOT in args.report.parents else args.report}")
     return 0 if out["passed"] == out["total"] else 1
 
 

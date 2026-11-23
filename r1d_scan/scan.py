@@ -41,6 +41,9 @@ def main():
     parser.add_argument("--hold", type=float, default=2.0, help="结束后保持秒数")
     parser.add_argument("--passes", type=int, default=1, help="往返趟数（默认 1 趟 = 上下各一次）")
     parser.add_argument("--timeout", type=float, default=10.0, help="等首帧 LowState 的秒数")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="只规划、不发任何指令：用实测姿态把整轮时间轴离线检查一遍"
+                             "（限位/角速度/直线度/轴线/离箱面距离），报告 published_commands=0")
     args = parser.parse_args()
 
     profile = load_profile()
@@ -49,17 +52,25 @@ def main():
     if args.network != "lo":
         gaps = profile.gaps()
         if gaps:
-            raise SystemExit("真机准入检查未通过，拒绝启动（一条指令都不会发）：\n  - "
-                             + "\n  - ".join(gaps)
-                             + "\n请先用 tools/inspect_device.py 只读核对，"
-                               "再把 robot_profile.json 的 slot_source 改成 verified。")
+            # 预检一条指令都不发，所以闸门只当提醒；真正的闸门在写指令之前（下面这个 raise）
+            if args.dry_run:
+                print("提示：profile 仍有未核对项，预检继续（本次不会发任何指令）：\n  - "
+                      + "\n  - ".join(gaps), flush=True)
+            else:
+                raise SystemExit("真机准入检查未通过，拒绝启动（一条指令都不会发）：\n  - "
+                                 + "\n  - ".join(gaps)
+                                 + "\n请先用 tools/inspect_device.py 只读核对，"
+                                   "再把 robot_profile.json 的 slot_source 改成 verified。")
     raw_path = HERE / "robot_profile.json"
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     lo = joint_array(raw_path, "lower")
     hi = joint_array(raw_path, "upper")
     effort = joint_array(raw_path, "effort")
     codec = Codec(profile=profile)
-    _, motion = load_motion(passes=max(1, args.passes))
+    scan_data, motion = load_motion(passes=max(1, args.passes))
+    # 预检要用同一份几何定义，避免文档里的数字和代码里的对不上
+    profile_geom = {key: scan_data[key]
+                    for key in ("tcp_x_m", "y_m", "z_bottom_m", "z_top_m", "standoff_m")}
 
     initialize(args.network, args.domain)
     from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
@@ -110,14 +121,52 @@ def main():
         print(f"提示：起始姿态与 profile 里的典型下垂姿态不同（{', '.join(mismatch)}）。"
               "程序以实测姿态为起点，不影响执行；如果这不是你想要的位置，先手动摆好再启动。", flush=True)
 
-    publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
-    publisher.Init()
+    # publisher 必须在 Controller 之前 Init：它在 DDS 上建通道约 200 ms，
+    # 而时间基准是在 Controller 构造之后才对齐的，这段延迟才不会算进第一拍。
+    # （把这一行挪到对齐之后，第一拍就会测出 ~210 ms 停顿并被"控制周期"保护拦下。）
+    publisher = None
+    if not args.dry_run:
+        publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
+        publisher.Init()
+
     controller = Controller(captured, motion, lo, hi, codec.kp, codec.kd, effort,
                             limits=Limits(startup_hold=2.0), start=time.monotonic(),
                             expected_mode_machine=cache["state"].mode_machine)
     # __init__ 里加载 MuJoCo 模型耗时 1–2 s，必须在构造完之后重新对齐时间基准
     controller.previous = time.monotonic()
     controller.start = controller.previous + controller.limits.startup_hold
+
+    if args.dry_run:
+        # 预检：一切照真跑的时间轴算，但一条指令都不发。时间基准按相对时间给，
+        # 否则 target(now) 会因为 absolute start 而永远停在 startup-hold。
+        from kinematics import ArmKinematics
+        import preflight
+        controller.start = controller.limits.startup_hold
+        result = preflight.run(controller, motion, profile_geom, controller.limits,
+                               ArmKinematics())
+        payload = result.report()
+        payload.update({"network": args.network, "domain": args.domain,
+                        "captured_q_deg": np.degrees(captured).round(2).tolist()})
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                               encoding="utf-8")
+        print(f"\n预检：{result.seconds:.1f} s 时间轴，发出指令 {result.published_commands} 条", flush=True)
+        print(f"  关节限位最小余量 {result.min_limit_margin_deg:.1f}°（{profile.names()[result.binding_joint]}）",
+              flush=True)
+        print(f"  目标角速度峰值 {result.max_joint_speed_deg_s:.1f}°/s", flush=True)
+        print(f"  接近段最大行程 {result.approach_delta_deg:.1f}°", flush=True)
+        print(f"  扫描段横向偏差 {result.max_transverse_mm:.2f} mm，轴线 {result.max_axis_deg:.2f}°，"
+              f"z {result.z_range_m[0]:.3f}–{result.z_range_m[1]:.3f} m", flush=True)
+        print(f"  全程离箱面最小 {result.min_standoff_mm:.1f} mm", flush=True)
+        if result.violations:
+            print("预检不通过：", flush=True)
+            for v in result.violations[:20]:
+                print(f"  - {v}", flush=True)
+            print(f"报告 {args.report}", flush=True)
+            return FAULT_EXIT
+        print("预检通过：可以从这个姿态开始真跑。", flush=True)
+        print(f"报告 {args.report}", flush=True)
+        return 0
 
     runner = Runner(controller, codec, publisher, profile,
                     log_path=args.log, hold=args.hold).open_log()

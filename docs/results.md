@@ -41,9 +41,12 @@
 ## 4. 现在怎么用
 
 ```bash
-# 一条命令：现场检查 → 通道检查 → 抓取确认 → 扫描 → 汇总
-bash run_real.sh                 # 1 趟（上下各一次，约 86 s）
+# 一条命令：现场检查 → 预检(0 指令) → 抓取确认 → 扫描 → 汇总
+bash run_real.sh                 # 1 趟（上下各一次，约 65 s）
 PASSES=3 bash run_real.sh        # 3 趟
+
+# 只预检不动：用实测姿态把整轮时间轴离线走一遍
+python3 r1d_scan/scan.py --network ens33 --domain 0 --dry-run --report out/pre.json
 ```
 
 前置：机器人上电、遥控器进入低层（Q5）、人已就位、急停在手。
