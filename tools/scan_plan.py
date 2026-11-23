@@ -81,6 +81,8 @@ def main():
                              "能走到余量更好的分支（真机腕限位收窄后必须这样）")
     parser.add_argument("--pre-roll", type=float, default=0.15,
                         help="串行求解时先在扫描线下方预热的距离 m（决定进入哪个分支）")
+    parser.add_argument("--ik-tol", type=float, default=1.0,
+                        help="允许的 TCP 偏差 mm；调大 = 用精度换平滑（直线度判据 20 mm）")
     parser.add_argument("--time-smooth", type=float, default=0.15,
                         help="运行期时间轴平滑窗口 s（写进 profile，controller 会用）；"
                              "越大越丝滑、越慢")
@@ -185,10 +187,18 @@ def main():
         before = np.abs(np.diff(qs, 2, axis=0)).max()
         qs = savgol_filter(qs, args.smooth, 3, axis=0)
         mid = np.abs(np.diff(qs, 2, axis=0)).max()
-        # 平滑会把控制点推离约束（实测最多 1.2 mm）：从平滑后的值出发再投影回去，
-        # 修正量很小，不会把抖动带回来。
-        qs = np.array([kin.solve(p, axis_target, q, active=active, refine=True).q
-                       for p, q in zip(points, qs)])
+        # 平滑会把控制点推离约束。原本每个点都投影回去，但那样会把平滑又抵消一部分
+        # （二阶差分 2.36 -> 5.58 deg）。改成只修超出容差的点：容差越大越平滑，
+        # 代价是 TCP 可以偏一点 —— 直线度判据是 20 mm，这里是在花那份预算。
+        tol = args.ik_tol / 1000.0
+        fixed = 0
+        for i, (target_pt, q_) in enumerate(zip(points, qs)):
+            pos, _, _ = kin.forward(q_)
+            if np.linalg.norm(pos - np.array(target_pt)) > tol:
+                qs[i] = kin.solve(target_pt, axis_target, q_, active=active, refine=True).q
+                fixed += 1
+        if fixed:
+            print(f"  fixed {fixed}/{len(qs)} points (tol {args.ik_tol:.1f} mm)")
         after = np.abs(np.diff(qs, 2, axis=0)).max()
         print(f"控制点平滑（窗口 {args.smooth}）：二阶差分峰值 {np.degrees(before):.2f}° → "
               f"{np.degrees(mid):.2f}°；投影回约束后 {np.degrees(after):.2f}°")
@@ -199,9 +209,9 @@ def main():
         errors.append(float(np.linalg.norm(position - np.array(points[i]))))
         margins.append(kin.margin(q)[0])
         bindings.append(kin.margin(q)[1])
-        if errors[-1] > 1e-3:
-            raise SystemExit(f"第 {i} 点连续推进误差 {errors[-1]*1000:.2f} mm，"
-                             "扫描线可能超出可达范围")
+        if errors[-1] > args.ik_tol / 1000.0:
+            raise SystemExit(f"第 {i} 点误差 {errors[-1]*1000:.2f} mm 超过容差 "
+                             f"{args.ik_tol:.1f} mm，扫描线可能超出可达范围")
 
     distances = np.linspace(0.0, float(zs[-1] - zs[0]), len(zs))
     motion = LocalPathMotion(distances, qs, args.speed, args.joint_speed,
