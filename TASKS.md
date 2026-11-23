@@ -12,7 +12,7 @@
 > 下一步进阶段 5 接真机做只读核对。
 > 已产出：官方 A7 模型、MuJoCo 场景、站位卡（箱面前 0.70 m / 站距 0.20 m）、
 > 101 点扫描轨迹（单程 15.73 s，横向偏差 0.19 mm）、DDS 仿真闭环（一轮约 53 s，回到初始姿态）、
-> 保护项注入测试 29 项全通过（见 `docs/faults.md`）。
+> 保护项注入测试 29 项全通过（见 `docs/testing.md`）。
 > 待办：只读核对槽位/方向/限位、探头轴线与质量（STEP 已量出外廓，缺安装面与探测面）、
 > 装真件后重建模型并重生成轨迹。
 >
@@ -52,13 +52,13 @@
 **任务**
 - [ ] 1.1 需求数字确认：行程、扫几趟、速度、箱面高度范围、允许偏差
 - [x] 1.2 拿到 R1-D 的 URDF + mesh（官方 `unitree_ros/robots/r1_a7_description/r1_a7.urdf`，17 个活动关节）
-- [x] 1.3 跑 `tools/check_urdf.py`：左臂 7、右臂 7、腰 1，限位与 effort 已记录（见 `docs/device.md`）
+- [x] 1.3 跑 `tools/check_urdf.py`：左臂 7、右臂 7、腰 1，限位与 effort 已记录（见 `docs/hardware.md`）
 - [x] 1.4 记录官方 A7 低层示例的 KP/KD（100/50，Kd=2）、槽位（左臂 15–21）、启动方式
 - [x] 1.5 探头参数表：本体 **126×126×190 mm**、探测面 **Ø47**、质量 **1.5 kg（估）**、
       质心 95 mm（估）、轴线沿腕部 +x 正装、法兰 70×70×6 贴腕部、工作距 200 mm、
-      TCP = 本体前端面中心（见 `docs/device.md` §7）
+      TCP = 本体前端面中心（见 `docs/hardware.md` §7）
 
-**产出**：`models/r1_a7.urdf` + `models/meshes/`、`models/urdf_check.json`、`docs/device.md`
+**产出**：`models/r1_a7.urdf` + `models/meshes/`、`（urdf 自检结果可由 `tools/check_urdf.py` 再生）`、`docs/hardware.md`
 
 ---
 
@@ -77,10 +77,10 @@
 - [x] 2.2 探头（真件几何：本体 126×126×190 mm、探测面 Ø47、1.5 kg，沿腕部局部 +x 正装）+ 箱面板 + 地面
 - [x] 2.3 力矩执行器、相邻连杆碰撞排除、写 `simulation.json`（含哪些关节被固定）
 - [x] 2.4 可视化：在 MuJoCo 窗口里目视确认整机形态与探头朝向（`bash run_demo.sh`）
-- [x] 2.5 可达性扫描：TCP 可覆盖的 z 范围、站距范围、各关节余量、奇异位形（见 `docs/workspace.md`）
+- [x] 2.5 可达性扫描：TCP 可覆盖的 z 范围、站距范围、各关节余量、奇异位形（见 `docs/hardware.md`）
 - [x] 2.6 站位卡：**箱面前 0.70 m、探头伸出 0.50 m、站距 0.20 m、可扫 z 0.92–1.48 m**
 
-**产出**：`models/r1_a7_scene.xml`、`models/simulation.json`、`docs/workspace.md`
+**产出**：`models/r1_a7_scene.xml`、`models/simulation.json`、`docs/hardware.md`
 
 ---
 
@@ -112,7 +112,7 @@
 **依赖**：阶段 3
 **关卡（Gate 4）**
 - 控制器与 MuJoCo 仿真器两个独立进程经 DDS 跑通，指令拒绝数 0。
-- 发送频率：实测 345–410 Hz（虚拟机 `time.sleep` 粒度所限，见 `docs/faults.md`）；
+- 发送频率：实测 345–410 Hz（虚拟机 `time.sleep` 粒度所限，见 `docs/testing.md`）；
   原生 Linux 上预期 500 Hz，真机核对时复测。
 - 首帧与结束目标相对起始姿态的差为 0。
 - 状态机完整跑完一轮（含停稳切换）并回到保持。
@@ -129,7 +129,7 @@
       最大跟踪误差 ≤0.03 rad、最终回到捕获姿态 `[10,0,0,60,0,0,0]°`；
       图见 `out/closed_loop_frames.png`（运行产物，不入库）
 - [x] 4.6 保护项注入测试 29 项全通过（三层：进程内 / 真 DDS 进程级 / 仿真器对抗），
-      见 `tools/fault_injection.py`、`out/fault_injection.json`、`docs/faults.md`
+      见 `tools/fault_injection.py`、`out/fault_injection.json`、`docs/testing.md`
 - [x] 4.7 控制主循环抽成 `runner.py`（不含 DDS），"Guard 失败 ⇒ 这一拍不发指令"变成可测的不变量
 - [x] 4.8 右臂保持指令（Q9）：每拍写"启动时实测角 + 保持 KP/KD"，与左臂同一条 LowCmd 发出；
       `sim.py --hold servo` 用 PD 保持（关掉等式约束）复现真机行为，整轮右臂最大偏差 **0.3°**
@@ -137,7 +137,7 @@
       直接拒绝启动，一条指令都不发
 
 **产出**：`r1d_scan/{transport,controller,runner,sim,fake_robot}.py`、`tools/fault_injection.py`、
-`out/scan_run.json`（运行产物）、`out/fault_injection.json`（运行产物）、`docs/faults.md`
+`out/scan_run.json`（运行产物）、`out/fault_injection.json`（运行产物）、`docs/testing.md`
 
 ---
 
@@ -155,13 +155,13 @@
 - [ ] 5.1 用真实槽位与 KP/KD 替换 `provisional`，**先重跑一遍仿真回归**，确认没退化
 - [ ] 5.2 现场准备：急停可及、人员分工、底盘刹车、按站位卡摆位
 - [x] 5.0 只读核对包（现场作业单）：`inspect_device.py` 改成分窗口统计（q 均值/极差/噪声、
-      `|tau|`、温度、`mode`）+ 与期望姿态比偏差；`docs/joint_map.md` 是六列表的填写说明与
+      `|tau|`、温度、`mode`）+ 与期望姿态比偏差；`docs/testing.md` 是六列表的填写说明与
       三条硬标准；`analyze_device.py` 生成草稿表（控制 7 + 保持 7 都标了归属）
 - [x] 5.3 现场只读核对（已完成）：链路 680 Hz/0 坏 CRC、`mode_machine=11`、14/14 槽位活着、
       姿态稳定 ±0.01°；并在真机上做了接管试验（保持 7 s 零位移、7 个关节各 ±4° 方向一致）
-- [x] 5.4a 分级验证前两级（hold / probe）：见 `docs/real_trials.md` 第二次记录
+- [x] 5.4a 分级验证前两级（hold / probe）：见 `docs/results.md` 第二次记录
 - [x] 5.4b 真机完整跑通（scan×1）：50 cm 往返，25,543 条指令、309 Hz、跟踪最大 3.4°，
-      回到起点误差 ≤0.05°；反算直线度 4.8 mm、轴线偏差 5.8°（见 `docs/real_trials.md` 第三次）
+      回到起点误差 ≤0.05°；反算直线度 4.8 mm、轴线偏差 5.8°（见 `docs/results.md` 第三次）
 - [x] 5.4c scan×3 与重复性：三轮最大散差 **2.9 mm**（判据 ≤30 mm），三轮直线度一致 4.2 mm
 - [ ] 5.4 分级验证，每级留存报告与 CSV
 - [ ] 5.5 抖动专项：分清"规划抖 / PD 抖 / 机械抖"（目标曲线、PD 力矩、实测 dq 频谱）
@@ -169,7 +169,7 @@
 - [ ] 5.7 装真探头：更新 `tool.json` → 重建模型 → 重生成轨迹 → 复跑分级
 - [ ] 5.8 辐射联调：导出 TCP 速度曲线、确认启停同步信号；若 Q4 选定点则加停留计时段
 
-**产出**：`docs/joint_map.md`、`docs/real_trials.md`、`precision_report.md`、`integration.md`
+**产出**：`docs/testing.md`、`docs/results.md`、`precision_report.md`、`integration.md`
 
 ---
 

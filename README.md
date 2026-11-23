@@ -26,18 +26,16 @@ r1d_radiate_scan/
 ├── docs/
 │   ├── install.md            # 环境搭建（Ubuntu 22.04 / MuJoCo / unitree_sdk2py）
 │   ├── architecture.md       # 代码结构、数据流、控制回路、如何扩展
-│   ├── device.md             # 机型事实：关节、限位、effort、DDS 槽位、右臂保持做法
-│   ├── workspace.md          # 站位卡、可扫 z 范围、轨迹指标
-│   ├── joint_map.md          # 阶段 5a 现场作业单：六列表怎么填、三条硬标准
-│   ├── faults.md             # 保护项清单 + 注入测试证据
-│   └── real_trials.md        # 真机试验记录（仿真数据不混入）
+│   ├── hardware.md           # 机型/槽位/限位/探头参数 + 站位卡与轨迹指标
+│   ├── testing.md            # 保护项清单与注入测试 + 真机核对作业单
+│   └── results.md            # 需求对照（验收结论）+ 五次真机试验记录
 ├── models/
 │   ├── r1_a7.urdf            # 官方 R1-A7 URDF（unitree_ros）
 │   ├── meshes/               # 官方 STL（19 个）
-│   ├── r1_a7_scene.xml       # 由 build_scene.py 生成：整机 + 探头假件 + 箱面
+│   ├── r1_a7_scene.xml       # 由 build_scene.py 生成：整机 + 探头 + 箱面
 │   ├── scan_profile.json     # 101 点扫描轨迹（关节角序列）
-│   ├── simulation.json       # 场景清单：nq/nu、锁了哪些关节、执行器力矩上限
-│   └── urdf_check.json       # URDF 自检结果（限位/effort/臂长）
+│   └── simulation.json       # 场景清单：nq/nu、锁了哪些关节、执行器力矩上限
+├── data/                     # 真机运行数据（压缩 CSV，唯一留存的证据）
 ├── r1d_scan/                 # 运行时库
 │   ├── robot_profile.json    # 关节名/槽位/KP-KD/保持关节（真机前必须核对）
 │   ├── profile.py            # profile 读取与校验
@@ -56,14 +54,20 @@ r1d_radiate_scan/
 │   ├── scan_workspace.py     # 可达性/站位扫描
 │   ├── scan_plan.py          # 生成扫描轨迹 → models/scan_profile.json
 │   ├── tune_gains.py         # 按目标阻尼比标定模型阻尼
-│   ├── check_urdf.py         # URDF 自检
 │   ├── measure_step.py       # 从 STEP 文件量探头外形（不需要 CAD）
-│   ├── fault_injection.py    # 保护项注入测试（三层）
+│   ├── check_urdf.py         # URDF 自检
 │   ├── inspect_device.py     # 真机只读采集（窗口内统计；不 import 任何 publisher）
 │   ├── analyze_device.py     # 采集结果 → 六列对照表草稿
+│   ├── watch_lowcmd.py       # 接管前检查通道上有没有别人在发指令
+│   ├── nudge.py              # 分级接管：抓取 / 单关节微动
+│   ├── check_run.py          # 运行后复盘：逐关节指令 vs 实测
+│   ├── tcp_from_csv.py       # 用实测关节角反算 TCP 轨迹与直线度
+│   ├── repeatability.py      # 多轮运行之间的散差
+│   ├── fault_injection.py    # 保护项注入测试（三层）
 │   └── fetch_urdf.sh         # 官方 URDF 下载脚本（记录模型来源）
-├── run_demo.sh               # 一条命令跑完整一轮（仿真）
-└── run_fault_tests.sh        # 一条命令跑全套保护项注入测试
+├── run_demo.sh               # 仿真跑一轮
+├── run_real.sh               # 真机一条龙（检查 → 抓取 → 扫描 → 汇总）
+└── run_fault_tests.sh        # 全套保护项注入测试
 ```
 
 `out/` 是运行产物目录（报告、CSV、截图），已在 `.gitignore` 里，不提交。
@@ -100,7 +104,7 @@ PASSES=3 bash run_real.sh        # 真机连扫 3 趟
    两个进程走真实的 DDS 协议，所以**换成真机只是把 `--network lo` 换成网卡名**。
 
 `scan.py` 与真机之间没有任何"仿真专用"分支；保护项（超时/CRC/故障字/温度/限位/角速度/力矩/跟踪误差/
-模式变化）在仿真里全部被真实触发过，见 [`docs/faults.md`](docs/faults.md)。
+模式变化）在仿真里全部被真实触发过，见 [`docs/testing.md`](docs/testing.md)。
 
 ## 真机安全声明
 
@@ -131,12 +135,12 @@ PASSES=3 bash run_real.sh        # 真机连扫 3 趟
 | 为什么这么设计、还差什么 | [`TASKS.md`](TASKS.md) |
 | 环境怎么搭、常见报错 | [`docs/install.md`](docs/install.md) |
 | 代码怎么组织、想改哪里 | [`docs/architecture.md`](docs/architecture.md) |
-| 机型参数、槽位、右臂怎么保持 | [`docs/device.md`](docs/device.md) |
-| 站位、可达范围、轨迹指标 | [`docs/workspace.md`](docs/workspace.md) |
-| 探头怎么装的、实测尺寸 | [`docs/device.md`](docs/device.md) §7 |
-| 真机核对怎么一步步做 | [`docs/joint_map.md`](docs/joint_map.md) |
-| 保护项怎么测的、停多快 | [`docs/faults.md`](docs/faults.md) |
-| 真机跑成什么样、还有哪些没做 | [`docs/acceptance.md`](docs/acceptance.md) |
+| 机型参数、槽位、右臂怎么保持 | [`docs/hardware.md`](docs/hardware.md) |
+| 站位、可达范围、轨迹指标 | [`docs/hardware.md`](docs/hardware.md) |
+| 探头怎么装的、实测尺寸 | [`docs/hardware.md`](docs/hardware.md) §7 |
+| 真机核对怎么一步步做 | [`docs/testing.md`](docs/testing.md) |
+| 保护项怎么测的、停多快 | [`docs/testing.md`](docs/testing.md) |
+| 真机跑成什么样、还有哪些没做 | [`docs/results.md`](docs/results.md) |
 
 ## 数据来源
 

@@ -86,7 +86,7 @@ runner.step(state, now)
 ## 6. 规划链
 
 ```
-docs/workspace.md 站位卡（箱面 0.70 m、站距 0.20 m、可扫 z 0.92–1.48）
+docs/hardware.md 站位卡（箱面 0.70 m、站距 0.20 m、可扫 z 0.92–1.48）
         │
         ▼  tools/scan_workspace.py   可达性扫描（关节余量、奇异、离箱面距离）
         ▼  tools/scan_plan.py        IK 逐点推进 → 101 点关节角 + 时间参数化
@@ -106,7 +106,7 @@ scan.py 运行期采样
 | 换机型/槽位 | `robot_profile.json` 的 `joints`/`hold_on_robot` | `python3 r1d_scan/profile.py` 查缺口 |
 | 保护阈值 | `controller.py` 的 `Limits` | 跑 `bash run_fault_tests.sh` |
 | 右臂怎么保持 | `robot_profile.json` 的 `hold_on_robot` | `HOLD=servo bash run_demo.sh` 验证 |
-| 控制频率 | `runner.py` 的 `period` | 注意虚拟机 `sleep` 粒度（见 docs/faults.md） |
+| 控制频率 | `runner.py` 的 `period` | 注意虚拟机 `sleep` 粒度（见 docs/testing.md） |
 
 ## 8. 测试
 
@@ -117,4 +117,4 @@ scan.py 运行期采样
 | 仿真器对抗 2 项 | `python3 tools/fault_injection.py --sim` | 仿真器会拒坏包 |
 | 全套 | `bash run_fault_tests.sh` | 上面全部，29 项 |
 
-`tools/fault_injection.py` 的分层设计说明见 [`faults.md`](faults.md)。
+`tools/fault_injection.py` 的分层设计说明见 [`testing.md`](testing.md)。

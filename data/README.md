@@ -29,7 +29,7 @@ python3 tools/tcp_from_csv.py data/rep1.csv                 # 反算 TCP 轨迹�
 | rep3 | 4.2 mm / 1.7 mm |
 
 三轮之间最大散差 **2.9 mm**（判据 ≤30 mm）。三轮直线度完全一致，说明运动是确定性的。
-详见 `docs/real_trials.md` 第五次记录。
+详见 `docs/results.md` 第五次记录。
 
 ## CSV 列
 
@@ -37,5 +37,5 @@ python3 tools/tcp_from_csv.py data/rep1.csv                 # 反算 TCP 轨迹�
 
 - `q_cmd_*`：我们发出去的目标角（rad）
 - `q_act_*`：机器人回报的实测角（rad）
-- `tau_*`：实测力矩（真机上基本为 0，见 `docs/acceptance.md`）
+- `tau_*`：实测力矩（真机上基本为 0，见 `docs/results.md`）
 - `phase`：startup-hold / approach / scan-up / scan-down / return / finished-hold
