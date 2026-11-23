@@ -927,23 +927,24 @@
       -1.341994124
     ]
   ],
+  "time_smooth_s": 0.3,
   "requested_peak_speed_m_s": 0.04,
   "joint_speed_limit_rad_s": 0.25,
-  "joint_acceleration_limit_rad_s2": 0.5,
+  "joint_acceleration_limit_rad_s2": 0.2,
   "planned_peak_path_speed_m_s": 0.0391999608000392,
-  "scan_seconds_one_way": 20.91541567909751,
-  "scan_seconds_total": 41.83083135819502,
+  "scan_seconds_one_way": 31.51544585568195,
+  "scan_seconds_total": 63.0308917113639,
   "certification_scale": 1.000001,
   "ik_max_position_error_mm": 0.007266087875641696,
   "ik_min_limit_margin_deg": 8.64311157230292,
   "binding_joint": "left_wrist_pitch_joint",
   "trajectory_check": {
-    "samples": 4184,
-    "max_transverse_mm": 0.19687412388945097,
-    "max_axis_deg": 0.04342082929522553,
-    "min_wall_gap_m": 0.19988592384499598,
-    "max_tip_speed_m_s": 0.039283174982209464,
-    "min_limit_margin_deg": 8.577495032997,
+    "samples": 6304,
+    "max_transverse_mm": 0.19695578162996116,
+    "max_axis_deg": 0.04342328063697046,
+    "min_wall_gap_m": 0.1998859259493787,
+    "max_tip_speed_m_s": 0.03923253821011816,
+    "min_limit_margin_deg": 8.577516498771711,
     "worst_penetration_mm": -0.0
   }
 }

@@ -153,7 +153,10 @@ class SmoothedTiming:
 
         v = np.gradient(s, dt)
         n = max(3, int(round(window_s / dt)) | 1)          # 奇数窗口
-        kernel = np.ones(n) / n
+        # 用 Hann（升余弦）窗而不是方窗：方窗卷积在两端有折角，速度曲线仍会有拐点；
+        # Hann 窗是 C∞ 的，抹出来的速度曲线没有折角，这才是"丝滑"的来源。
+        kernel = np.hanning(n)
+        kernel = kernel / kernel.sum()
         pad = n // 2
         v_pad = np.concatenate([np.full(pad, v[0]), v, np.full(pad, v[-1])])
         v_s = np.clip(np.convolve(v_pad, kernel, mode="valid"), 0.0, None)

@@ -81,6 +81,9 @@ def main():
                              "能走到余量更好的分支（真机腕限位收窄后必须这样）")
     parser.add_argument("--pre-roll", type=float, default=0.15,
                         help="串行求解时先在扫描线下方预热的距离 m（决定进入哪个分支）")
+    parser.add_argument("--time-smooth", type=float, default=0.15,
+                        help="运行期时间轴平滑窗口 s（写进 profile，controller 会用）；"
+                             "越大越丝滑、越慢")
     parser.add_argument("--smooth", type=int, default=9,
                         help="控制点 Savitzky-Golay 平滑窗口（奇数，0=不平滑）；"
                              "样条会放大控制点的小抖动，真机卡顿多半来自这里")
@@ -210,6 +213,7 @@ def main():
         "z_bottom_m": args.z_bottom, "z_top_m": args.z_top,
         "length_m": float(zs[-1] - zs[0]), "points": args.points,
         "joints": JOINTS, "locked_joints": list(args.lock), "q_rad": qs.round(9).tolist(),
+        "time_smooth_s": args.time_smooth,
         "requested_peak_speed_m_s": args.speed,
         "joint_speed_limit_rad_s": args.joint_speed,
         "joint_acceleration_limit_rad_s2": args.joint_acceleration,
