@@ -104,7 +104,9 @@ class Controller:
             return "approach", self.captured + s * (self.q_scan_start - self.captured)
         scan_elapsed = elapsed - self.approach_seconds
         if scan_elapsed < self.motion.duration:
-            direction = "scan-up" if scan_elapsed < self.motion.one_way_duration else "scan-down"
+            # 多趟时按"每一趟内的位置"判方向，否则第二趟起会一直被标成 scan-down
+            cycle_pos = scan_elapsed % (2 * self.motion.one_way_duration)
+            direction = "scan-up" if cycle_pos < self.motion.one_way_duration else "scan-down"
             return direction, self.motion.sample(scan_elapsed)
         # 往返结束后回到捕获姿态，让整轮动作回到起点
         back_elapsed = scan_elapsed - self.motion.duration
@@ -201,14 +203,14 @@ class Controller:
         return self.phase, q_target, float(np.max(np.abs(torque + feedforward)))
 
 
-def load_motion(path=PROFILE):
+def load_motion(path=PROFILE, passes=1):
     from path_timing import LocalPathMotion, SmoothedTiming
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     q = np.array(data["q_rad"], float)
     distance = np.linspace(0.0, data["length_m"], len(q))
     motion = LocalPathMotion(distance, q, data["requested_peak_speed_m_s"],
                              data["joint_speed_limit_rad_s"],
-                             data["joint_acceleration_limit_rad_s2"], cycles=1)
+                             data["joint_acceleration_limit_rad_s2"], cycles=passes)
     # 时间最优解是 bang-bang 的，加速度硬切换 → 真机上顿挫。
     # 这里只重排时间轴（路径不变），默认 0.15 s 滑动平均；profile 里可覆盖或设 0 关闭。
     window = float(data.get("time_smooth_s", 0.15))

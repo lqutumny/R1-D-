@@ -73,16 +73,18 @@ r1d_radiate_scan/
 环境见 [`docs/install.md`](docs/install.md)。装好后：
 
 ```bash
-bash run_demo.sh                 # 仿真里跑完整一轮（约 50 s，弹窗口）
-bash run_fault_tests.sh          # 保护项注入测试（约 100 s，29 项）
+bash run_demo.sh                 # 仿真里跑完整一轮（约 86 s，弹窗口）
+bash run_fault_tests.sh          # 保护项注入测试（约 110 s，30 项）
+bash run_real.sh                 # 真机：现场检查 → 抓取 → 扫描 → 汇总
+PASSES=3 bash run_real.sh        # 真机连扫 3 趟
 ```
 
 `run_demo.sh` 会自己拉起 MuJoCo 仿真器、等它就绪、跑控制器、收尾关窗。期望输出：
 
 ```
-阶段： startup-hold(0.0s) → approach(2.0s) → scan-up(10.7s) → scan-down(26.5s)
-       → return(42.2s) → finished-hold(50.9s)
-指令 2.3 万条，最大跟踪误差 0.03 rad，complete=True
+阶段： startup-hold(0.0s) → approach(2.0s) → scan-up(7.6s) → scan-down(43.9s)
+       → return(80.2s) → finished-hold(85.7s)
+指令 3.7 万条，最大跟踪误差 0.023 rad，complete=True
 最终关节角(deg)： [10.0, 0.0, 0.0, 60.0, 0.0, 0.0, 0.0]
 ```
 
@@ -114,11 +116,13 @@ bash run_fault_tests.sh          # 保护项注入测试（约 100 s，29 项）
 
 | 项 | 现状 | 说明 |
 |---|---|---|
-| 探头模型 | 真件 126×126×190、探测面 Ø47、1.5 kg | 质量与质心仍是估值，真件称重后重跑 |
-| 指令频率 | 345–440 Hz | 虚拟机 `time.sleep` 粒度所限；原生 Linux 预期接近 500 Hz |
-| 力矩预算 | URDF effort × 0.9 | 真机应换成厂商连续力矩 + 实测温升 |
-| 腰 yaw | 不由本程序控制 | 官方 A7 示例不驱动腰，槽位（12/13）待实测 |
-| 精度 | 仿真 0.19 mm / 0.06° | 真机按 20 mm / 10° 验收，绝对位置 ≤100 mm |
+| 探头模型 | 真件 126×126×190、探测面 Ø47、1.5 kg | 质量与质心仍是估值，用户决定不再核对 |
+| 指令频率 | 309–350 Hz | 虚拟机 `time.sleep` 粒度所限；原生 Linux 预期接近 500 Hz |
+| 力矩预算 | URDF effort × 0.9 | 真机 `tau_est` 实测近 0，只有"预计力矩"有效 |
+| 左腕 pitch 限位 | **±43°（实测硬限位）** | URDF 的 ±92.5° 作废；决定站位与速度 |
+| 扫描速度 | 0.014 m/s | 低于 0.02–0.05；腕限位收窄 + 为平滑降加速度所致 |
+| 精度 | 真机 4.8 mm 直线度 / 5.8° 轴线 | 绝对定位未测（用户判定无需） |
+| 重复性 | 三轮散差 2.9 mm | 通过 |
 
 ## 文档索引
 
@@ -132,6 +136,7 @@ bash run_fault_tests.sh          # 保护项注入测试（约 100 s，29 项）
 | 探头怎么装的、实测尺寸 | [`docs/device.md`](docs/device.md) §7 |
 | 真机核对怎么一步步做 | [`docs/joint_map.md`](docs/joint_map.md) |
 | 保护项怎么测的、停多快 | [`docs/faults.md`](docs/faults.md) |
+| 真机跑成什么样、还有哪些没做 | [`docs/acceptance.md`](docs/acceptance.md) |
 
 ## 数据来源
 

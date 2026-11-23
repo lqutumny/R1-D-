@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--report", type=Path, default=ROOT / "out" / "scan_run.json")
     parser.add_argument("--log", type=Path, default=ROOT / "out" / "scan_run.csv")
     parser.add_argument("--hold", type=float, default=2.0, help="结束后保持秒数")
+    parser.add_argument("--passes", type=int, default=1, help="往返趟数（默认 1 趟 = 上下各一次）")
     parser.add_argument("--timeout", type=float, default=10.0, help="等首帧 LowState 的秒数")
     args = parser.parse_args()
 
@@ -58,7 +59,7 @@ def main():
     hi = joint_array(raw_path, "upper")
     effort = joint_array(raw_path, "effort")
     codec = Codec(profile=profile)
-    _, motion = load_motion()
+    _, motion = load_motion(passes=max(1, args.passes))
 
     initialize(args.network, args.domain)
     from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
