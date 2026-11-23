@@ -1,0 +1,79 @@
+{
+  "network": "ens33",
+  "domain": 0,
+  "captured_q_deg": [
+    6.05,
+    -0.54,
+    -0.64,
+    77.74,
+    -0.35,
+    2.91,
+    0.21
+  ],
+  "hold_joints": [
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint"
+  ],
+  "hold_captured_deg": [
+    4.84,
+    3.67,
+    0.12,
+    80.0,
+    -0.34,
+    2.89,
+    0.2
+  ],
+  "commands_sent": 25543,
+  "command_rate_hz": 309.2,
+  "loop_dt_max_ms": 46.3,
+  "states_good": 20790,
+  "states_bad": 0,
+  "last_state_error": "",
+  "duration_s": 82.61,
+  "phases": [
+    {
+      "t": 0.0,
+      "phase": "startup-hold"
+    },
+    {
+      "t": 2.0,
+      "phase": "approach"
+    },
+    {
+      "t": 8.32,
+      "phase": "scan-up"
+    },
+    {
+      "t": 41.31,
+      "phase": "scan-down"
+    },
+    {
+      "t": 74.29,
+      "phase": "return"
+    },
+    {
+      "t": 80.61,
+      "phase": "finished-hold"
+    }
+  ],
+  "max_tracking_error_rad": 0.0595,
+  "model_scan_seconds": 65.97,
+  "final_q_deg": [
+    6.05,
+    -0.54,
+    -0.64,
+    77.74,
+    -0.35,
+    2.91,
+    0.21
+  ],
+  "complete": true,
+  "fault": null,
+  "fault_detected_at": null,
+  "last_command_at": 4341.787717942
+}
