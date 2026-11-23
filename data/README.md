@@ -10,6 +10,7 @@
 | `rep1/2/3.csv.gz` + `.json` | **重复性三轮**（同一段程序连跑三次），用于 P8 |
 | `scan_real2.csv.gz` + `.json` | 第一轮完整跑通（旧轨迹，33 s/单程，用于"卡顿"前后对比） |
 | `scan_real4.csv.gz` + `.json` | 换平滑后重跑（25 s/单程） |
+| `smooth1.csv.gz` + `.json` | **柔顺版轨迹第一趟**（`--ik-tol 5` + 时间平滑 0.30 s + 加限 0.2），24.6 s/单程，速度首次达标 20.2 mm/s |
 
 ## 怎么用
 
@@ -37,5 +38,6 @@ python3 tools/tcp_from_csv.py data/rep1.csv                 # 反算 TCP 轨迹�
 
 - `q_cmd_*`：我们发出去的目标角（rad）
 - `q_act_*`：机器人回报的实测角（rad）
-- `tau_*`：实测力矩（真机上基本为 0，见 `docs/results.md`）
+- `tau_*`：实测 `tau_est`。**静止时基本为 0，运动中才有值**（柔顺版：肩 pitch 峰 9.46、腕 pitch 1.89），
+  按关节比额定力矩才是判据，见 `docs/results.md` 第六次
 - `phase`：startup-hold / approach / scan-up / scan-down / return / finished-hold
