@@ -185,11 +185,17 @@ class Controller:
 
 
 def load_motion(path=PROFILE):
-    from path_timing import LocalPathMotion
+    from path_timing import LocalPathMotion, SmoothedTiming
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     q = np.array(data["q_rad"], float)
     distance = np.linspace(0.0, data["length_m"], len(q))
     motion = LocalPathMotion(distance, q, data["requested_peak_speed_m_s"],
                              data["joint_speed_limit_rad_s"],
                              data["joint_acceleration_limit_rad_s2"], cycles=1)
+    # 时间最优解是 bang-bang 的，加速度硬切换 → 真机上顿挫。
+    # 这里只重排时间轴（路径不变），默认 0.15 s 滑动平均；profile 里可覆盖或设 0 关闭。
+    window = float(data.get("time_smooth_s", 0.15))
+    if window > 0:
+        motion = SmoothedTiming(motion, window,
+                                 accel_limit=data["joint_acceleration_limit_rad_s2"])
     return data, motion

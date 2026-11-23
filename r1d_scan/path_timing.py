@@ -121,3 +121,76 @@ class LocalPathMotion:
             return self.path(s, 1)*(ds*np.where(reverse, -1., 1.))[..., None]
         return (self.path(s, 2)*ds[..., None]**2
                 + self.path(s, 1)*(u/self.certification_scale**2)[..., None])
+
+
+
+class SmoothedTiming:
+    """把"时间最优"轨迹的 bang-bang 速度曲线抹平，**空间路径完全不变**。
+
+    为什么需要：线性规划给的是时间最优解，加速度在 ±a_max 之间硬切换。
+    加速度阶跃 = jerk 无穷大，电机每次切换都"顿"一下，真机上就是可见/可听的卡顿。
+    这里只重排时间轴：s(t) 变平滑，而 q = path(s) 仍落在同一条空间路径上，
+    所以 TCP 直线度、离箱面距离这些几何指标一点都不会变。
+
+    做法：按 1 ms 从原 motion 的表格还原 s(t) → 对 ds/dt 滑动平均 →
+    缩放到总长度不变 → 重新积分成 s(t)。
+    """
+
+    def __init__(self, motion, window_s=0.15, accel_limit=None):
+        self._m = motion
+        self.duration = motion.duration
+        self.one_way_duration = motion.one_way_duration
+
+        dt = 0.001
+        t = np.arange(0.0, self.one_way_duration + dt, dt)
+        times = np.asarray(motion.times, float)
+        grid = np.asarray(motion.grid, float)
+        vel = np.asarray(motion.path_velocity, float)
+        acc = np.asarray(motion.path_acceleration, float)
+        cell = np.clip(np.searchsorted(times, t, side="right") - 1, 0, len(times) - 2)
+        h = t - times[cell]
+        s = np.clip(grid[cell] + vel[cell] * h + 0.5 * acc[cell] * h ** 2, grid[0], grid[-1])
+
+        v = np.gradient(s, dt)
+        n = max(3, int(round(window_s / dt)) | 1)          # 奇数窗口
+        kernel = np.ones(n) / n
+        pad = n // 2
+        v_pad = np.concatenate([np.full(pad, v[0]), v, np.full(pad, v[-1])])
+        v_s = np.clip(np.convolve(v_pad, kernel, mode="valid"), 0.0, None)
+
+        if v_s.sum() <= 0:
+            raise ValueError("平滑后速度全为 0，窗口过大")
+        s_new = np.concatenate([[0.0], np.cumsum(v_s[:-1]) * dt])
+        s_new *= s[-1] / s_new[-1]                          # 保证走完全程
+
+        self._t = t
+        self._s = s_new
+        self.peak_speed = float(v_s.max())
+
+        # 平滑会把速度拉平 → 归一化后加速度反而可能超标。超了就按 sqrt 比例拉长时间轴
+        # （加速度 ∝ 1/t²），用"稍慢一点"换"不顿挫"。
+        if accel_limit:
+            step = 0.001
+            ts = np.arange(0.0, self.one_way_duration, step)
+            qs_ = motion.path(np.interp(ts, self._t, self._s))
+            ddq = np.diff(qs_, 2, axis=0) / step ** 2
+            amax = float(np.abs(ddq).max())
+            if amax > accel_limit:
+                stretch = float(np.sqrt(amax / accel_limit))
+                self._t = self._t * stretch
+                self.one_way_duration *= stretch
+                self.duration *= stretch
+                self.stretch = stretch
+                self.accel_before = amax
+            else:
+                self.stretch = 1.0
+                self.accel_before = amax
+
+    def sample(self, t, derivative=0):
+        if derivative != 0:
+            raise ValueError("平滑后的时间轴只支持位置采样")
+        elapsed = np.clip(np.asarray(t, float), 0.0, self.duration)
+        phase = np.remainder(elapsed, 2 * self.one_way_duration)
+        local = np.where(phase > self.one_way_duration,
+                         2 * self.one_way_duration - phase, phase)
+        return self._m.path(np.interp(local, self._t, self._s))

@@ -81,6 +81,9 @@ def main():
                              "能走到余量更好的分支（真机腕限位收窄后必须这样）")
     parser.add_argument("--pre-roll", type=float, default=0.15,
                         help="串行求解时先在扫描线下方预热的距离 m（决定进入哪个分支）")
+    parser.add_argument("--smooth", type=int, default=9,
+                        help="控制点 Savitzky-Golay 平滑窗口（奇数，0=不平滑）；"
+                             "样条会放大控制点的小抖动，真机卡顿多半来自这里")
     args = parser.parse_args()
     weights = np.ones(len(JOINTS))
     if "waist_yaw_joint" in JOINTS:
@@ -136,8 +139,8 @@ def main():
         raise SystemExit(f"首点 IK 失败：位置 {sol.position_error*1000:.2f} mm")
     if args.chain:
         # 串行求解：先在扫描线下方预热一段，再逐点以上一点为初值。
-        # 这样能走到"腕 pitch 只在 −33°~+32° 之间摆"的好分支，
-        # 而微分推进从通用初值出发会落到贴着限位的坏分支上。
+        # 只有这样才能走到"腕 pitch 少动"的分支（微分推进会漂到贴限位的分支上）。
+        # 代价是冗余自由度逐点乱选 → 控制点有小抖动，后面用 --smooth 抹平。
         q = default_seed()
         if args.pre_roll > 0:
             for z in np.linspace(args.z_bottom - args.pre_roll, args.z_bottom, 9)[:-1]:
@@ -171,6 +174,21 @@ def main():
             print(f"局部修补了 {len(patched)} 个点（微分推进丢分支）")
         if rejected:
             print(f"仍无法解出的点：{rejected[:5]}")
+
+    # 控制点平滑：哪怕求解器给的点有小抖动，样条也会把它放大成可见的振动。
+    # 用 Savitzky-Golay 在"关节角序列"上平滑，位置误差只有微米级（抖动本来就在零空间里）。
+    if args.smooth >= 5:
+        from scipy.signal import savgol_filter
+        before = np.abs(np.diff(qs, 2, axis=0)).max()
+        qs = savgol_filter(qs, args.smooth, 3, axis=0)
+        mid = np.abs(np.diff(qs, 2, axis=0)).max()
+        # 平滑会把控制点推离约束（实测最多 1.2 mm）：从平滑后的值出发再投影回去，
+        # 修正量很小，不会把抖动带回来。
+        qs = np.array([kin.solve(p, axis_target, q, active=active, refine=True).q
+                       for p, q in zip(points, qs)])
+        after = np.abs(np.diff(qs, 2, axis=0)).max()
+        print(f"控制点平滑（窗口 {args.smooth}）：二阶差分峰值 {np.degrees(before):.2f}° → "
+              f"{np.degrees(mid):.2f}°；投影回约束后 {np.degrees(after):.2f}°")
 
     errors, margins, bindings = [], [], []
     for i, q in enumerate(qs):
