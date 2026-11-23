@@ -103,6 +103,21 @@
     "source": "SolidWorks 实测（2026-11-20）：本体长 190 mm、探测面 Ø47（面积 1734.94 mm² / 周长 147.65 mm 反推一致）、质量按 1.5 kg 估、正装（轴线垂直于 70×70×6 法兰、穿过法兰中心）",
     "note": "offset_m = 法兰安装面到本体最外端；探测面是本体前端 Ø47 的圆面（略有内凹，未计入）"
   },
+  "real_machine": {
+    "note": "2026-11-23 只读实测（ens33 / DDS domain 0），未发送任何指令",
+    "mode_machine": 11,
+    "mode_pr": 0,
+    "packet_rate_hz": 680,
+    "bad_crc": 0,
+    "waist_yaw_slot": 13,
+    "slot12_warning": "槽位 12 报 q=86 rad（4934°），不是关节角度；绝不能把它放进保持列表——scan.py 会在启动时用 ±π 做闸门拦掉",
+    "stand_pose_deg": {
+      "left_shoulder_pitch": 6.1, "left_shoulder_roll": -2.2, "left_shoulder_yaw": 0.3,
+      "left_elbow": 84.4, "left_wrist_roll": -1.0, "left_wrist_pitch": 2.9, "left_wrist_yaw": 0.4,
+      "right_shoulder_pitch": 4.2, "right_elbow": 82.8
+    },
+    "tau_est_warning": "实测 |tau_est| 只有 0.02–0.11 N·m，撑不起 2 kg 手臂的重力矩，疑似该模式下不填这个字段。保护项里的『实测力矩超限』在真机上可能形同虚设，别拿它当安全依据；『预计力矩』那一项仍然有效"
+  },
   "hold_on_robot": {
     "note": "真机上只发左臂 7 个槽位时，右臂没人管；按同事做法写固定值让它不动：每拍写 q=动作开始前实测值、dq=0、tau=0，kp/kd 用本表。腰 yaw 暂不纳入：官方 A7 示例只驱动 14 臂 + 2 头、不驱动腰，且腰 yaw 槽位（13？）未确认——先在只读核对里查清再决定由谁保持。头 2 关节同理不纳入。仿真默认用等式约束保持，--hold servo 可切到 PD 保持做验证。",
     "joints": [

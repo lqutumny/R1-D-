@@ -29,7 +29,8 @@ r1d_radiate_scan/
 │   ├── device.md             # 机型事实：关节、限位、effort、DDS 槽位、右臂保持做法
 │   ├── workspace.md          # 站位卡、可扫 z 范围、轨迹指标
 │   ├── joint_map.md          # 阶段 5a 现场作业单：六列表怎么填、三条硬标准
-│   └── faults.md             # 保护项清单 + 注入测试证据
+│   ├── faults.md             # 保护项清单 + 注入测试证据
+│   └── real_trials.md        # 真机试验记录（仿真数据不混入）
 ├── models/
 │   ├── r1_a7.urdf            # 官方 R1-A7 URDF（unitree_ros）
 │   ├── meshes/               # 官方 STL（19 个）

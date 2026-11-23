@@ -89,6 +89,14 @@ def main():
     hold_captured = None
     if codec.hold_slots.size:
         hold_captured = np.asarray(cache["state"].hold_q, float).copy()
+        # 槽位配错时，这里会读到别的电机（真机上见过某槽位报 86 rad）。
+        # 照原样写回去 = 让那个关节全速冲向一个荒谬角度，所以在发第一个包之前先验一遍。
+        insane = [f"槽位{s}={np.degrees(v):.0f}°" for s, v in zip(codec.hold_slots, hold_captured)
+                  if not -np.pi <= v <= np.pi]
+        if insane:
+            raise SystemExit("保持关节的实测角不合理，槽位可能配错，拒绝启动：\n  "
+                             + "、".join(insane)
+                             + "\n请先用 tools/inspect_device.py 只读核对槽位。")
         codec.hold_targets = hold_captured
         names = ", ".join(f"{n}={np.degrees(v):.1f}°" for n, v in zip(codec.hold_names, hold_captured))
         print(f"保持关节（写固定值）: {names}", flush=True)
@@ -98,8 +106,8 @@ def main():
                 for name, angle in expected.items()
                 if abs(captured[profile.names().index(name)] - angle) > np.radians(5)]
     if mismatch:
-        print(f"警告：捕获姿态与预期下垂姿态不符（{', '.join(mismatch)}）。"
-              "如果刚刚改过模型，请确认仿真器是重新启动的。", flush=True)
+        print(f"提示：起始姿态与 profile 里的典型下垂姿态不同（{', '.join(mismatch)}）。"
+              "程序以实测姿态为起点，不影响执行；如果这不是你想要的位置，先手动摆好再启动。", flush=True)
 
     publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
     publisher.Init()
