@@ -179,6 +179,14 @@ def add_scene(scene, cfg, limits):
             joint.set("armature", str(cfg["armature"]))
             effort = limits[joint.get("name")]["effort"]
             joint.set("actuatorfrcrange", f"{-effort:.1f} {effort:.1f}")
+    # profile 里的限位优先于 URDF：真机实测左腕 pitch 只有 ±43°（URDF 写 ±92.5°），
+    # 让模型的机械限位与真机一致，规划/仿真才不会"撞了还以为是控制问题"。
+    for raw_joint in _RAW["joints"]:
+        if raw_joint.get("lower") is None or raw_joint.get("upper") is None:
+            continue
+        for joint in scene.findall(".//joint"):
+            if joint.get("name") == raw_joint["name"]:
+                joint.set("range", f"{raw_joint['lower']:.6f} {raw_joint['upper']:.6f}")
             # 关节阻尼由 tools/tune_gains.py 按"目标阻尼比"计算后写回，
             # 这里不拍一个数，避免两处定义冲突。
 

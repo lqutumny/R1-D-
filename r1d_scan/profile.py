@@ -23,6 +23,8 @@ class Joint:
     kp: float | None
     kd: float | None
     role: str
+    lower: float | None = None     # 规划用的限位（真机实测为准，优先于 URDF）
+    upper: float | None = None
 
 
 @dataclass(frozen=True)
@@ -115,7 +117,10 @@ def load(path=PROFILE_PATH):
         role = raw.get("role")
         if role not in ROLES:
             raise ProfileError(f"{name}: role 必须是 {ROLES} 之一，实际 {role!r}")
-        joints.append(Joint(name, slot, kp, kd, role))
+        lower, upper = raw.get("lower"), raw.get("upper")
+        if lower is not None and upper is not None and not lower < upper:
+            raise ProfileError(f"{name}: lower 必须小于 upper（{lower} ≥ {upper}）")
+        joints.append(Joint(name, slot, kp, kd, role, lower, upper))
     if not joints:
         raise ProfileError("profile 里没有关节")
     tool = data.get("tool") or {}

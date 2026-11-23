@@ -16,7 +16,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "r1d_scan"))
-from kinematics import ArmKinematics, default_seed, SCENE  # noqa: E402
+from kinematics import ArmKinematics, JOINTS, default_seed, SCENE  # noqa: E402
+from profile import load as load_profile  # noqa: E402
 
 FEASIBLE_POS_M = 1e-3
 FEASIBLE_AXIS_DEG = 0.5
@@ -68,6 +69,12 @@ def main():
     args = parser.parse_args()
 
     kin = ArmKinematics(args.scene)
+    # 与 scan_plan 一致：profile 的限位优先（真机实测的左腕 pitch 只有 ±43°）
+    for joint in load_profile().joints:
+        if joint.name in JOINTS and joint.lower is not None:
+            i = JOINTS.index(joint.name)
+            kin.lo[i] = joint.lower
+            kin.hi[i] = joint.upper
     zs = np.arange(args.z_min, args.z_max + 1e-9, args.z_step)
     print(f"扫描 TCP x ∈ {args.tcp_x}，y={args.y}，z {args.z_min:.2f}–{args.z_max:.2f} m")
     print(f"{'TCP x':>6} {'可行 z 区间':>22} {'长度':>7} {'最小余量':>9} {'最差穿透':>9}  说明")

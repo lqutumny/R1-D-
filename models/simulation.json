@@ -2,7 +2,7 @@
   "source_urdf": "r1_a7.urdf",
   "scene": "r1_a7_scene.xml",
   "base_z_m": 1.0,
-  "wall_x_m": 0.7,
+  "wall_x_m": 0.64,
   "controlled_joints": [
     "left_shoulder_pitch_joint",
     "left_shoulder_roll_joint",

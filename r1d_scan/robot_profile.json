@@ -1,8 +1,8 @@
 {
   "robot": "R1-A7-D",
-  "note": "只控制左臂 7 关节；腰与右臂在模型中由等式约束固定（腰 0°，右臂垂放）。槽位待实机确认。",
-  "verified": false,
-  "slot_source": "provisional",
+  "note": "只控制左臂 7 关节，右臂 7 关节写固定值保持（Q9）。2026-11-23 真机核对：ens33/domain 0，14/14 槽位活着、7 个左臂关节各自 ±4° 探测方向一致、跟踪 0.3-1.1°、mode_machine=11。未做限位顶死测试，沿用 URDF 限位 -2° 余量。",
+  "verified": true,
+  "slot_source": "verified",
   "joints": [
     {
       "name": "left_shoulder_pitch_joint",
@@ -60,9 +60,10 @@
       "kp": 50.0,
       "kd": 2.0,
       "role": "left_arm",
-      "lower": -1.614,
-      "upper": 1.614,
-      "effort": 10.0
+      "lower": -0.75,
+      "upper": 0.75,
+      "effort": 10.0,
+      "limit_source": "真机实测 2026-11-23：指令 +48° 实际停在 +45.0°，URDF 的 ±92.5° 不成立；这里取 ±43°（留 2° 余量），负向按对称假设，未顶死验证"
     },
     {
       "name": "left_wrist_yaw_joint",
@@ -112,22 +113,65 @@
     "waist_yaw_slot": 13,
     "slot12_warning": "槽位 12 报 q=86 rad（4934°），不是关节角度；绝不能把它放进保持列表——scan.py 会在启动时用 ±π 做闸门拦掉",
     "stand_pose_deg": {
-      "left_shoulder_pitch": 6.1, "left_shoulder_roll": -2.2, "left_shoulder_yaw": 0.3,
-      "left_elbow": 84.4, "left_wrist_roll": -1.0, "left_wrist_pitch": 2.9, "left_wrist_yaw": 0.4,
-      "right_shoulder_pitch": 4.2, "right_elbow": 82.8
+      "left_shoulder_pitch": 6.1,
+      "left_shoulder_roll": -2.2,
+      "left_shoulder_yaw": 0.3,
+      "left_elbow": 84.4,
+      "left_wrist_roll": -1.0,
+      "left_wrist_pitch": 2.9,
+      "left_wrist_yaw": 0.4,
+      "right_shoulder_pitch": 4.2,
+      "right_elbow": 82.8
     },
-    "tau_est_warning": "实测 |tau_est| 只有 0.02–0.11 N·m，撑不起 2 kg 手臂的重力矩，疑似该模式下不填这个字段。保护项里的『实测力矩超限』在真机上可能形同虚设，别拿它当安全依据；『预计力矩』那一项仍然有效"
+    "tau_est_warning": "实测 |tau_est| 只有 0.02–0.11 N·m，撑不起 2 kg 手臂的重力矩，疑似该模式下不填这个字段。保护项里的『实测力矩超限』在真机上可能形同虚设，别拿它当安全依据；『预计力矩』那一项仍然有效",
+    "verified_on": "2026-11-23",
+    "verified_scope": "槽位/方向/稳定/跟踪；限位未顶死验证"
   },
   "hold_on_robot": {
     "note": "真机上只发左臂 7 个槽位时，右臂没人管；按同事做法写固定值让它不动：每拍写 q=动作开始前实测值、dq=0、tau=0，kp/kd 用本表。腰 yaw 暂不纳入：官方 A7 示例只驱动 14 臂 + 2 头、不驱动腰，且腰 yaw 槽位（13？）未确认——先在只读核对里查清再决定由谁保持。头 2 关节同理不纳入。仿真默认用等式约束保持，--hold servo 可切到 PD 保持做验证。",
     "joints": [
-      {"name": "right_shoulder_pitch_joint", "slot": 22, "kp": 100.0, "kd": 2.0},
-      {"name": "right_shoulder_roll_joint", "slot": 23, "kp": 100.0, "kd": 2.0},
-      {"name": "right_shoulder_yaw_joint", "slot": 24, "kp": 100.0, "kd": 2.0},
-      {"name": "right_elbow_joint", "slot": 25, "kp": 100.0, "kd": 2.0},
-      {"name": "right_wrist_roll_joint", "slot": 26, "kp": 50.0, "kd": 2.0},
-      {"name": "right_wrist_pitch_joint", "slot": 27, "kp": 50.0, "kd": 2.0},
-      {"name": "right_wrist_yaw_joint", "slot": 28, "kp": 50.0, "kd": 2.0}
+      {
+        "name": "right_shoulder_pitch_joint",
+        "slot": 22,
+        "kp": 100.0,
+        "kd": 2.0
+      },
+      {
+        "name": "right_shoulder_roll_joint",
+        "slot": 23,
+        "kp": 100.0,
+        "kd": 2.0
+      },
+      {
+        "name": "right_shoulder_yaw_joint",
+        "slot": 24,
+        "kp": 100.0,
+        "kd": 2.0
+      },
+      {
+        "name": "right_elbow_joint",
+        "slot": 25,
+        "kp": 100.0,
+        "kd": 2.0
+      },
+      {
+        "name": "right_wrist_roll_joint",
+        "slot": 26,
+        "kp": 50.0,
+        "kd": 2.0
+      },
+      {
+        "name": "right_wrist_pitch_joint",
+        "slot": 27,
+        "kp": 50.0,
+        "kd": 2.0
+      },
+      {
+        "name": "right_wrist_yaw_joint",
+        "slot": 28,
+        "kp": 50.0,
+        "kd": 2.0
+      }
     ]
   },
   "initial": {

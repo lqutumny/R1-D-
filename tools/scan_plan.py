@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "r1d_scan"))
 from kinematics import ArmKinematics, JOINTS, default_seed, SCENE  # noqa: E402
 from path_timing import LocalPathMotion  # noqa: E402
+from profile import load as load_profile  # noqa: E402
 
 PROFILE = ROOT / "models" / "scan_profile.json"
 REPORT = ROOT / "out" / "scan_plan.json"
@@ -72,17 +73,37 @@ def main():
                         help="腰 yaw 的刚度权重，越大越不愿意转（>2 会破坏连续性，待优化）")
     parser.add_argument("--wrist-stiffness", type=float, default=1.0,
                         help="腕 roll 的刚度权重（对圆柱探头无影响）")
+    parser.add_argument("--stiff", nargs="*", default=[],
+                        help="额外关节刚度，形如 left_wrist_pitch_joint=6（越大越不愿意动）。"
+                             "真机上小力矩关节（腕）吃不住大扫角时用它，让肩肘去承担")
+    parser.add_argument("--chain", action="store_true",
+                        help="用「沿 z 串行求解」代替微分推进：每点以上一点为初值，"
+                             "能走到余量更好的分支（真机腕限位收窄后必须这样）")
+    parser.add_argument("--pre-roll", type=float, default=0.15,
+                        help="串行求解时先在扫描线下方预热的距离 m（决定进入哪个分支）")
     args = parser.parse_args()
     weights = np.ones(len(JOINTS))
     if "waist_yaw_joint" in JOINTS:
         weights[JOINTS.index("waist_yaw_joint")] = args.waist_stiffness
     if "left_wrist_roll_joint" in JOINTS:
         weights[JOINTS.index("left_wrist_roll_joint")] = args.wrist_stiffness
+    for item in args.stiff:
+        name, _, value = item.partition("=")
+        if name not in JOINTS:
+            raise SystemExit(f"--stiff 里的 {name} 不是受控关节；可选：{JOINTS}")
+        weights[JOINTS.index(name)] = float(value)
     active = np.array([name not in args.lock for name in JOINTS])
     if active.sum() < 5:
         raise SystemExit(f"锁定 {args.lock} 后只剩 {int(active.sum())} 个自由度，少于 5 个约束")
 
     kin = ArmKinematics(args.scene)
+    # profile 是限位的唯一真源：真机实测过的限位（例如左腕 pitch 只有 ±43°，
+    # 而 URDF 写 ±92.5°）在这里覆盖模型，规划器就会自己避开，而不是撞上去再被保护拦住。
+    for joint in load_profile().joints:
+        if joint.name in JOINTS:
+            i = JOINTS.index(joint.name)
+            kin.lo[i] = joint.lower
+            kin.hi[i] = joint.upper
     wall_x = float(kin.model.geom_pos[mujoco.mj_name2id(kin.model, mujoco.mjtObj.mjOBJ_GEOM, "wall")][0])
     axis_target = np.array([1.0, 0.0, 0.0])
     tcp_x = wall_x - args.standoff
@@ -90,21 +111,66 @@ def main():
     points = [[tcp_x, args.y, float(z)] for z in zs]
 
     qs, seed = [], default_seed()
-    generic_seeds = [seed, seed + 0.3, seed - 0.3, np.zeros(len(JOINTS))]
-    # 第一点：多初值求解；其余点沿直线做微分连续推进（最小范数，不漂移）
-    sol = None
-    for candidate in [seed] + generic_seeds:
-        trial = kin.solve(points[0], axis_target, candidate, toward=seed, active=active,
-                          refine=False)
-        if sol is None or trial.position_error < sol.position_error:
-            sol = trial
-        if trial.position_error <= 1e-6 and trial.axis_error_deg <= 0.1:
-            break
+    # 多初值求解。注意：不能"第一个收敛的就收"——那样会选中贴着限位的分支，
+    # 后面整条路径都跟着贴死（真机上就是撞机械限位）。要在所有收敛解里挑**余量最大**的。
+    candidates = [seed, seed + 0.3, seed - 0.3, np.zeros(len(JOINTS)),
+                  seed + np.array([0, 0, 0, 0, 0, -0.6, 0]),
+                  seed + np.array([-0.3, 0, 0, 0.3, 0, -0.3, 0])]
+    sol, sol_margin = None, -1e9
+    for candidate in candidates:
+        trial = kin.solve(points[0], axis_target, candidate, toward=candidate, active=active,
+                          refine=True)
+        if trial.position_error > 1e-3:
+            continue
+        margin = kin.margin(trial.q)[0]
+        if sol is None or margin > sol_margin:
+            sol, sol_margin = trial, margin
+    if sol is None:
+        for candidate in candidates:
+            trial = kin.solve(points[0], axis_target, candidate, toward=candidate, active=active,
+                              refine=False)
+            if sol is None or trial.position_error < sol.position_error:
+                sol = trial
+    print(f"首点：选了余量 {sol_margin:.1f}° 的分支" if sol_margin > -1e8 else "首点：没有收敛解")
     if sol.position_error > 1e-3:
         raise SystemExit(f"首点 IK 失败：位置 {sol.position_error*1000:.2f} mm")
-    # iters 从默认 6 提到 15：换探头后首段步长变大，6 次迭代收敛到 1.02 mm 就停了
-    qs = kin.follow_line(points, axis_target, sol.q, active=active, joint_weights=weights,
-                         iters=15)
+    if args.chain:
+        # 串行求解：先在扫描线下方预热一段，再逐点以上一点为初值。
+        # 这样能走到"腕 pitch 只在 −33°~+32° 之间摆"的好分支，
+        # 而微分推进从通用初值出发会落到贴着限位的坏分支上。
+        q = default_seed()
+        if args.pre_roll > 0:
+            for z in np.linspace(args.z_bottom - args.pre_roll, args.z_bottom, 9)[:-1]:
+                q = kin.solve([tcp_x, args.y, float(z)], axis_target, q,
+                              active=active, refine=True).q
+        qs = []
+        for p in points:
+            q = kin.solve(p, axis_target, q, active=active, refine=True).q
+            qs.append(q)
+        qs = np.array(qs)
+        print(f"串行求解：预热 {args.pre_roll*100:.0f} cm，共 {len(qs)} 点")
+        patched, rejected = [], []
+    else:
+        # iters 从默认 6 提到 15：换探头后首段步长变大，6 次迭代收敛到 1.02 mm 就停了
+        qs = kin.follow_line(points, axis_target, sol.q, active=active, joint_weights=weights,
+                             iters=15)
+        # 局部修补：腕 pitch 限位收窄后，微分推进偶尔会在某个点丢掉分支
+        patched, rejected = [], []
+        for i, q in enumerate(qs):
+            pos, _, _ = kin.forward(q)
+            if np.linalg.norm(pos - np.array(points[i])) > 1e-3 and i > 0:
+                trial = kin.solve(points[i], axis_target, qs[i - 1], toward=qs[i - 1],
+                                  active=active, refine=True)
+                jump = float(np.max(np.abs(trial.q - qs[i - 1])))
+                if trial.position_error <= 1e-3 and jump < 0.15:
+                    qs[i] = trial.q
+                    patched.append(i)
+                elif trial.position_error > 1e-3:
+                    rejected.append((i, round(trial.position_error * 1000, 2)))
+        if patched:
+            print(f"局部修补了 {len(patched)} 个点（微分推进丢分支）")
+        if rejected:
+            print(f"仍无法解出的点：{rejected[:5]}")
 
     errors, margins, bindings = [], [], []
     for i, q in enumerate(qs):
