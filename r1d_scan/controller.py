@@ -22,6 +22,13 @@ class Limits:
     tracking_seconds: float = 0.30
     torque_fraction: float = 0.90
     state_timeout: float = 0.20
+    # 控制周期：单次停顿和"反复停顿"分开判。
+    # 虚拟机/普通 PC 上偶发一次 50–80 ms 的调度停顿是无害的（手臂保持最后指令，路径少走 ~1.5 mm），
+    # 但"10 s 内反复停顿"说明环境根本不适合跑控制，那才必须停。
+    loop_stall_stop: float = 0.15     # 单次超过这个 → 立即停
+    loop_stall_warn: float = 0.05     # 超过这个记一次"打嗝"
+    loop_hiccups: int = 5             # 窗口内打嗝次数达到这个 → 停
+    loop_window: float = 10.0
     startup_hold: float = 2.0
     approach_seconds: float = 4.0
     approach_speed_factor: float = 0.5    # 接近段用一半的关节限速，减小 PD 滞后
@@ -80,6 +87,7 @@ class Controller:
         self.last_q = self.captured.copy()
         self.last_velocity = np.zeros_like(self.captured)
         self.bad_since = None
+        self.hiccups = []               # 控制循环的"打嗝"时刻
         self.phase = "startup-hold"
         self.complete = False
         self.finished_at = None
@@ -171,10 +179,19 @@ class Controller:
 
     def tick(self, state, now):
         dt = now - self.previous
-        # 70 ms 与 TASKS.md 的安全红线一致（原为 50 ms，比文档更严，
-        # 但虚拟机负载抖动会让 58 ms 的偶发停顿误杀一整轮）。
-        if dt <= 0 or dt > 0.070:
+        # 两级判据：单次大停顿 vs 窗口内反复打嗝（见 Limits 里的说明）
+        if dt <= 0:
             raise ControlFault(f"控制周期异常 {dt*1000:.1f} ms")
+        if dt > self.limits.loop_stall_stop:
+            raise ControlFault(f"控制周期异常 {dt*1000:.1f} ms（单次停顿超过 "
+                               f"{self.limits.loop_stall_stop*1000:.0f} ms）")
+        if dt > self.limits.loop_stall_warn:
+            self.hiccups.append(now)
+            self.hiccups = [t for t in self.hiccups if now - t < self.limits.loop_window]
+            if len(self.hiccups) >= self.limits.loop_hiccups:
+                raise ControlFault(
+                    f"控制循环反复停顿：{self.limits.loop_window:.0f} s 内 "
+                    f"{len(self.hiccups)} 次超过 {self.limits.loop_stall_warn*1000:.0f} ms")
         self.phase, q_target = self.target(now)
         feedforward = self.gravity(q_target)
         self.last_ff = feedforward

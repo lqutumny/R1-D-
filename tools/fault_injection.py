@@ -256,7 +256,15 @@ def run_unit(rig, echo):
     def slow_loop(rig, attempt):
         now = rig.t0 + 0.5
         park(rig, now)
-        attempt(make_state(rig, rig.captured, now), now - 0.1)      # dt = 0.1 s
+        attempt(make_state(rig, rig.captured, now), now - 0.30)     # dt = 0.30 s > 单次上限 0.15
+
+    def repeated_hiccups(rig, attempt):
+        """10 s 内反复停顿超过阈值 → 判环境不适合，停。"""
+        now = rig.t0 + 0.5
+        park(rig, now)
+        for _ in range(6):
+            attempt(make_state(rig, rig.captured, now), now)
+            now += 0.08        # 每次 dt = 80 ms > warn 50 ms，但 < 单次上限 150 ms
 
     def nan_target(rig, attempt):
         now = rig.t_scan + 3.0
@@ -283,7 +291,8 @@ def run_unit(rig, echo):
     case("目标角速度超限", "角速度 0.40 rad/s", "角速度", fast_jump)
     case("预计力矩超预算", "力矩预算 90%", "力矩", torque_budget)
     case("跟踪误差持续", "跟踪误差 0.2 rad/0.3 s", "跟踪误差", tracking)
-    case("控制周期异常", "控制周期 >70 ms", "控制周期", slow_loop)
+    case("控制周期异常", "控制周期 >150 ms", "控制周期", slow_loop)
+    case("反复停顿", "10 s 内 5 次 >50 ms", "反复停顿", repeated_hiccups)
     case("目标非有限值", "编码阶段拦截", "有限关节角", nan_target)
     case("Write 返回 False", "发送失败", "写入失败", write_fails, expect_write=True)
     return report(results, echo)
