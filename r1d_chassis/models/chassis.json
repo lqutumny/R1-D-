@@ -1,0 +1,40 @@
+{
+  "note": "底盘与升降柱参数。限幅用 max_*；assumed 段是**假设值**，阶段 1 的运动学底盘不参与计算，等现场量完再改这里。",
+  "max_vx_m_s": 0.2,
+  "max_vy_m_s": 0.1,
+  "max_w_rad_s": 0.4,
+  "watchdog_s": 0.5,
+  "height": {
+    "enabled": true,
+    "measured": true,
+    "measured_on": "2026-11-23",
+    "measured_by": "卷尺，量'立柱顶面/机身底面'到'底盘板上表面'的垂直距离",
+    "mechanical_gap_m": [
+      0.1,
+      0.9
+    ],
+    "usable_gap_m": [
+      0.4,
+      0.9
+    ],
+    "arm_clearance_gap_m": 0.4,
+    "max_vz_normalized": 0.5,
+    "column_max_m_s": 0.0765,
+    "nominal_gap_m": 0.84,
+    "note": "机械行程 10–90 cm（0.80 m），但立柱低于 40 cm 时手臂会打到底盘，所以软件只用 40–90 cm（0.50 m）。vz 是归一化 [-1,1]，×76.5 mm/s 才是速度；nominal_gap_m=0.84 来自仿真几何（base_z 1.00 − 底板 0.16），真机的'机身底面'与模型 mount 原点可能差几厘米。",
+    "nominal_gap_calibrated": false,
+    "nominal_gap_note": "0.84 m 是仿真几何值（base_z 1.00 − 底板 0.16），对应模型的 mount 原点（腰 yaw 轴），**不是机身底面**。真机若要用立柱定高，需按 TASKS 6.2c 标定：顶端归零后下走已知量，量实际下降。"
+  },
+  "assumed": {
+    "wheel_radius_m": 0.075,
+    "track_width_m": 0.42,
+    "wheelbase_m": 0.5,
+    "base_mass_kg": 30.0,
+    "base_size_m": [
+      0.6,
+      0.44,
+      0.16
+    ],
+    "source": "未实测。轮径/轮距只影响以后做动力学底盘（带轮摩擦）时的换算，阶段 1 用运动学模型。"
+  }
+}
