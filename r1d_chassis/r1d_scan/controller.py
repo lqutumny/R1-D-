@@ -35,6 +35,20 @@ class Limits:
     approach_accel_factor: float = 0.5
 
 
+def side_scan_limits(data):
+    limits = Limits()
+    speed = float(data.get("transfer_joint_speed_rad_s",
+                           limits.joint_speed * limits.approach_speed_factor))
+    if not 0.0 < speed <= limits.joint_speed:
+        raise ValueError("左侧扫描接近和收纳限速必须为正且不超过全局关节限速")
+    limits.approach_speed_factor = speed / limits.joint_speed
+    startup_hold = float(data.get("startup_hold_s", limits.startup_hold))
+    if not 0.5 <= startup_hold <= limits.startup_hold:
+        raise ValueError("左侧扫描启动保持时间必须在 0.5–2.0 s")
+    limits.startup_hold = startup_hold
+    return limits
+
+
 def transition(start, end, seconds, samples=200):
     """五次平滑过渡：两端位置/速度为零。"""
     u = np.linspace(0.0, 1.0, samples)
@@ -130,7 +144,7 @@ class Controller:
         points, times = schedule
         i = np.searchsorted(times, elapsed, side="right") - 1
         u = (elapsed - times[i]) / (times[i + 1] - times[i])
-        return points[i] + self._transition_progress(u) * (points[i + 1] - points[i])
+        return points[i] + np.expand_dims(self._transition_progress(u), -1) * (points[i + 1] - points[i])
 
     def target(self, now):
         elapsed = now - self.start
@@ -151,6 +165,29 @@ class Controller:
             return "return", self._transfer_at(self.retract, back_elapsed)
         self.complete = True
         return "finished-hold", self.stow
+
+    def preflight_targets(self, times):
+        """批量采样，保留运行时使用的时间边界与过渡曲线。"""
+        elapsed = times - self.start
+        scan_elapsed = elapsed - self.approach_seconds - self.ready_seconds
+        back_elapsed = scan_elapsed - self.motion.duration
+        startup = elapsed < 0
+        approach = (elapsed >= 0) & (elapsed < self.approach_seconds)
+        ready = ~(startup | approach) & (scan_elapsed < 0)
+        scan = (scan_elapsed >= 0) & (back_elapsed < 0)
+        retract = (back_elapsed >= 0) & (back_elapsed < self.return_seconds)
+        finished = ~(startup | approach | ready | scan | retract)
+        q = np.empty((len(times), len(self.captured)))
+        phases = np.empty(len(times), dtype=object)
+        q[startup], phases[startup] = self.captured, "startup-hold"
+        q[approach], phases[approach] = self._transfer_at(self.approach, elapsed[approach]), "approach"
+        q[ready], phases[ready] = self.q_scan_start, "scan-ready"
+        q[scan] = self.motion.sample(scan_elapsed[scan])
+        cycle = scan_elapsed[scan] % (2 * self.motion.one_way_duration)
+        phases[scan] = np.where(cycle < self.motion.one_way_duration, "scan-up", "scan-down")
+        q[retract], phases[retract] = self._transfer_at(self.retract, back_elapsed[retract]), "return"
+        q[finished], phases[finished] = self.stow, "finished-hold"
+        return phases, q
 
     # ---------- 重力前馈 ----------
     def gravity(self, q):
@@ -235,7 +272,7 @@ class Controller:
         if self.ready_seconds and self.phase == "scan-up" and not self.scan_started:
             if (np.max(np.abs(state.q - self.q_scan_start)) > 0.12
                     or np.max(np.abs(state.dq)) > 0.10):
-                raise ControlFault("未在 50 cm 扫描下端点附近稳定，未开始扫动")
+                raise ControlFault("未在扫描下端点附近稳定，未开始扫动")
             self.scan_started = True
         self.last_q = q_target.copy()
         self.previous = now

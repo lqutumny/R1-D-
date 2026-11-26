@@ -43,8 +43,8 @@ class Solution:
 
 
 class ArmKinematics:
-    def __init__(self, scene=SCENE):
-        self.model = mujoco.MjModel.from_xml_path(str(scene))
+    def __init__(self, scene=SCENE, *, model=None):
+        self.model = model if model is not None else mujoco.MjModel.from_xml_path(str(scene))
         self.data = mujoco.MjData(self.model)
         self.jids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n) for n in JOINTS]
         missing = [n for n, j in zip(JOINTS, self.jids) if j < 0]
@@ -62,6 +62,10 @@ class ArmKinematics:
         """返回 (TCP 世界位置, 探头轴线世界方向, 腕部旋转矩阵)。"""
         self.data.qpos[self.qadr] = q
         mujoco.mj_kinematics(self.model, self.data)
+        return self.current_pose()
+
+    def current_pose(self):
+        """读取本次前向运动学已更新的 TCP 和腕部朝向。"""
         rotation = self.data.xmat[self.wrist].reshape(3, 3)
         return self.data.site_xpos[self.tcp_site].copy(), rotation[:, 0].copy(), rotation
 

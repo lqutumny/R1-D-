@@ -6,6 +6,7 @@
 退出码：0 = 走完整轮；2 = 保护触发，已停止发送（机器人保持最后一条指令）；1 = 其它错误。
 """
 import argparse
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import sys
@@ -17,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
-from controller import Controller, Limits, load_motion  # noqa: E402
+from controller import Controller, Limits, load_motion, side_scan_limits  # noqa: E402
 from dds_network import initialize  # noqa: E402
 from profile import load as load_profile  # noqa: E402
 from runner import Runner  # noqa: E402
@@ -44,8 +45,47 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="只规划、不发任何指令：用实测姿态把整轮时间轴离线检查一遍"
                              "（限位/角速度/直线度/轴线/离箱面距离），报告 published_commands=0")
+    parser.add_argument("--side-profile", type=Path, help="左侧扫描轨迹（第 1 阶段仅仿真）")
+    parser.add_argument("--side-scene", type=Path, help="固定立柱的左侧箱面场景")
+    parser.add_argument("--side-real-trial", action="store_true", help="固定立柱试扫，需在终端回车确认")
+    parser.add_argument("--trial-length-cm", type=int, choices=(15, 60), help="真机试扫单程长度，默认 15 cm")
+    parser.add_argument("--trial-speed-mm-s", type=int, choices=(25, 51),
+                        help="60 cm 试扫的速度档，默认 25，51 为规划峰速约 51 mm/s")
     args = parser.parse_args()
+    if args.trial_speed_mm_s is not None and not (args.side_real_trial and args.trial_length_cm == 60):
+        parser.error("--trial-speed-mm-s 只适用于 60 cm 真机试扫")
+    if args.trial_length_cm is not None and not args.side_real_trial:
+        parser.error("--trial-length-cm 必须与 --side-real-trial 一起使用")
+    if args.side_real_trial:
+        if args.side_profile is not None or args.side_scene is not None or args.passes != 1:
+            parser.error("低速试扫使用专用轨迹和场景，仅允许一个往返")
+        args.trial_length_cm = args.trial_length_cm or 15
+        if args.trial_length_cm == 60:
+            args.trial_speed_mm_s = args.trial_speed_mm_s or 25
+            filename = ("side_trial_60_51_profile.json" if args.trial_speed_mm_s == 51
+                        else "side_trial_60_profile.json")
+        else:
+            args.trial_speed_mm_s = 16
+            filename = "side_trial_profile.json"
+        args.side_profile = ROOT / "models" / filename
+        args.side_scene = ROOT / "models" / "r1_a7_scene_side_trial.xml"
+    if args.side_real_trial and not args.dry_run and not sys.stdin.isatty():
+        parser.error("请在交互终端运行试扫，并按回车确认")
+    side = args.side_profile is not None
+    if side != (args.side_scene is not None):
+        parser.error("--side-profile 和 --side-scene 应同时指定")
+    if side and args.network != "lo" and not (args.dry_run or args.side_real_trial):
+        parser.error("常规左侧扫描只在仿真运行，真机首轮试扫使用 --side-real-trial")
+    with ExitStack() as resources:
+        result = run(args, side, resources)
+    if result == 0 and args.side_real_trial:
+        status = "只读预检完成，发送运动指令 0 条" if args.dry_run else "试扫完成，无控制故障"
+        print(f"{status}。报告 {args.report}", flush=True)
+    return result
 
+
+def run(args, side, resources):
+    started = time.monotonic()
     profile = load_profile()
     # 真机准入锁：非回环网卡必须使用已核对的 profile，否则一条指令都不发。
     # 仿真（lo）不受此限，因为它本来就跑在暂定槽位上。
@@ -67,11 +107,18 @@ def main():
     hi = joint_array(raw_path, "upper")
     effort = joint_array(raw_path, "effort")
     codec = Codec(profile=profile)
-    scan_data, motion = load_motion(passes=max(1, args.passes))
+    if side:
+        scan_data, motion = load_motion(args.side_profile, passes=max(1, args.passes))
+        if scan_data.get("wall_axis") != 1:
+            parser.error("左侧扫描轨迹必须使用 +Y 箱面")
+    else:
+        scan_data, motion = load_motion(passes=max(1, args.passes))
     # 预检要用同一份几何定义，避免文档里的数字和代码里的对不上
     profile_geom = {key: scan_data[key]
                     for key in ("tcp_x_m", "y_m", "z_bottom_m", "z_top_m", "standoff_m")}
 
+    if side:
+        profile_geom["wall_axis"] = 1
     initialize(args.network, args.domain)
     from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
@@ -89,18 +136,35 @@ def main():
 
     subscriber = ChannelSubscriber("rt/lowstate", LowState_)
     subscriber.Init(on_state, 1)
+    resources.callback(subscriber.Close)
     deadline = time.monotonic() + args.timeout
-    while cache["good"] < 20 and time.monotonic() < deadline:
+    stable_since = None
+    snapshot = None
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        state = cache["state"]
+        stable = (cache["good"] >= 20 and state is not None
+                  and now - state.received <= .20
+                  and np.max(np.abs(state.dq)) <= .10)
+        if stable:
+            stable_since = stable_since or now
+            if now - stable_since >= .25:
+                snapshot = state
+                break
+        else:
+            stable_since = None
         time.sleep(0.01)
-    if cache["good"] < 20:
-        raise SystemExit(f"没有有效 LowState（good={cache['good']}, bad={cache['bad']}, "
-                         f"{cache['error']}）；仿真器是否已启动？")
-    captured = cache["state"].q.copy()
-    print(f"捕获姿态: {np.round(np.degrees(captured), 1).tolist()} deg", flush=True)
+    if snapshot is None:
+        detail = ("手臂仍在运动" if cache["state"] is not None
+                  and np.max(np.abs(cache["state"].dq)) > .10 else "没有稳定的有效反馈")
+        raise SystemExit(f"无法捕获静止起始姿态：{detail}（good={cache['good']}, "
+                         f"bad={cache['bad']}, {cache['error']}）")
+    captured = snapshot.q.copy()
+    print(f"捕获静止姿态: {np.round(np.degrees(captured), 1).tolist()} deg", flush=True)
     # 保持关节（右臂）：照启动时的实测角写回，等于"原地不动"，不会把手臂拽向理论值
     hold_captured = None
     if codec.hold_slots.size:
-        hold_captured = np.asarray(cache["state"].hold_q, float).copy()
+        hold_captured = np.asarray(snapshot.hold_q, float).copy()
         # 槽位配错时，这里会读到别的电机（真机上见过某槽位报 86 rad）。
         # 照原样写回去 = 让那个关节全速冲向一个荒谬角度，所以在发第一个包之前先验一遍。
         insane = [f"槽位{s}={np.degrees(v):.0f}°" for s, v in zip(codec.hold_slots, hold_captured)
@@ -119,61 +183,151 @@ def main():
                 if abs(captured[profile.names().index(name)] - angle) > np.radians(5)]
     if mismatch:
         print(f"提示：起始姿态与 profile 里的典型下垂姿态不同（{', '.join(mismatch)}）。"
-              "程序以实测姿态为起点，不影响执行；如果这不是你想要的位置，先手动摆好再启动。", flush=True)
+              "程序将从当前实测姿态自适应规划到 600 mm 扫描下端点，无需手动复位。", flush=True)
 
     # publisher 必须在 Controller 之前 Init：它在 DDS 上建通道约 200 ms，
     # 而时间基准是在 Controller 构造之后才对齐的，这段延迟才不会算进第一拍。
     # （把这一行挪到对齐之后，第一拍就会测出 ~210 ms 停顿并被"控制周期"保护拦下。）
     publisher = None
-    if not args.dry_run:
+    trial_guard = None
+    if not args.dry_run and not side:
         publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
         publisher.Init()
+        resources.callback(publisher.Close)
 
+    limits = side_scan_limits(scan_data) if side else Limits()
     controller = Controller(captured, motion, lo, hi, codec.kp, codec.kd, effort,
-                            limits=Limits(startup_hold=2.0), start=time.monotonic(),
-                            expected_mode_machine=cache["state"].mode_machine)
+                            limits=limits, start=time.monotonic(),
+                            expected_mode_machine=snapshot.mode_machine, scene=args.side_scene)
     # __init__ 里加载 MuJoCo 模型耗时 1–2 s，必须在构造完之后重新对齐时间基准
     controller.previous = time.monotonic()
     controller.start = controller.previous + controller.limits.startup_hold
 
-    if args.dry_run:
+    def check_start_pose():
+        current = cache["state"]
+        if (time.monotonic() - current.received > controller.limits.state_timeout
+                or current.mode_machine != snapshot.mode_machine or current.mode_pr != 0
+                or np.max(np.abs(current.q - captured)) > np.radians(1)
+                or np.max(np.abs(current.dq)) > 0.10
+                or (hold_captured is not None
+                    and np.max(np.abs(current.hold_q - hold_captured)) > np.radians(1))):
+            raise ControlFault("预检后手臂姿态或反馈变化，请重新运行预检")
+
+    if args.dry_run or side:
         # 预检：一切照真跑的时间轴算，但一条指令都不发。时间基准按相对时间给，
         # 否则 target(now) 会因为 absolute start 而永远停在 startup-hold。
         from kinematics import ArmKinematics
         import preflight
         controller.start = controller.limits.startup_hold
+        kin = ArmKinematics(model=controller.model)
+        clearance = None
+        if side:
+            import mujoco
+            from transfer import Clearance, plan
+            wall = mujoco.mj_name2id(kin.model, mujoco.mjtObj.mjOBJ_GEOM, "wall")
+            if wall < 0:
+                raise SystemExit("左侧场景缺少箱面")
+            wall_y = float(kin.model.geom_pos[wall, 1] - kin.model.geom_size[wall, 1])
+            if not np.isclose(wall_y, scan_data["y_m"] + scan_data["standoff_m"], atol=1e-6):
+                raise SystemExit("左侧场景与轨迹的箱面位置不一致")
+            held = {name: value for name, value in raw["held"].items() if name != "note"}
+            if hold_captured is not None:
+                held.update(zip(codec.hold_names, hold_captured))
+            margin = controller.limits.margin
+            clearance = Clearance(kin, lo + margin, hi - margin, wall_y, held, wall_axis=1)
+            stow = np.radians([raw["stow_deg"][name] for name in profile.names()])
+            typical = np.array([raw["initial"].get(name, 0.0) for name in profile.names()])
+            try:
+                approach = plan(clearance, captured, controller.q_scan_start, "左侧接近",
+                                via=(typical, stow))
+                retract = plan(clearance, motion.sample(motion.duration), stow, "收纳",
+                               via=(typical, captured))
+            except ControlFault as exc:
+                raise SystemExit(str(exc))
+            ready_seconds = float(scan_data.get("scan_ready_hold_s", 0.8))
+            if not 0.4 <= ready_seconds <= 1.5:
+                raise SystemExit("扫描下端点稳定时间必须在 0.4–1.5 s")
+            controller.set_transfers(approach, retract, ready_seconds=ready_seconds)
+        preflight_kwargs = {}
+        if args.side_real_trial:
+            # 路径规划器已按约 0.7° 关节分辨率检查组合几何；真机启动阶段
+            # 再以 5 ms 导数和 20 ms 几何网格复核整轮，减少重复的高密度计算。
+            preflight_kwargs = {
+                "sample_dt": float(scan_data.get("startup_preflight_sample_s", .005)),
+                "fk_dt": float(scan_data.get("startup_preflight_geometry_s", .020)),
+            }
         result = preflight.run(controller, motion, profile_geom, controller.limits,
-                               ArmKinematics())
+                               kin, clearance=clearance, **preflight_kwargs)
+        if side and result.min_limit_margin_deg < 4.0:
+            result.ok = False
+            result.violations.append("左侧扫描整轮关节余量低于 4°")
+        setup_seconds = time.monotonic() - started
         payload = result.report()
+        payload["setup_wall_seconds"] = round(setup_seconds, 3)
         payload.update({"network": args.network, "domain": args.domain,
                         "captured_q_deg": np.degrees(captured).round(2).tolist()})
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-                               encoding="utf-8")
-        print(f"\n预检：{result.seconds:.1f} s 时间轴，发出指令 {result.published_commands} 条", flush=True)
+        preflight_report = (args.report.with_name("preflight.json")
+                            if side and not args.dry_run else args.report)
+        preflight_report.parent.mkdir(parents=True, exist_ok=True)
+        preflight_report.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                                   encoding="utf-8")
+        print(f"\n预检用时 {setup_seconds:.1f} 秒，覆盖 {result.seconds:.1f} 秒动作，"
+              f"发出指令 {result.published_commands} 条", flush=True)
         print(f"  关节限位最小余量 {result.min_limit_margin_deg:.1f}°（{profile.names()[result.binding_joint]}）",
               flush=True)
         print(f"  目标角速度峰值 {result.max_joint_speed_deg_s:.1f}°/s", flush=True)
         print(f"  接近段最大行程 {result.approach_delta_deg:.1f}°", flush=True)
         print(f"  扫描段横向偏差 {result.max_transverse_mm:.2f} mm，轴线 {result.max_axis_deg:.2f}°，"
               f"z {result.z_range_m[0]:.3f}–{result.z_range_m[1]:.3f} m", flush=True)
-        print(f"  全程离箱面最小 {result.min_standoff_mm:.1f} mm", flush=True)
+        print(f"  扫描段离箱面最小 {result.min_standoff_mm:.1f} mm", flush=True)
         if result.violations:
             print("预检不通过：", flush=True)
             for v in result.violations[:20]:
                 print(f"  - {v}", flush=True)
-            print(f"报告 {args.report}", flush=True)
+            print(f"报告 {preflight_report}", flush=True)
             return FAULT_EXIT
-        print("预检通过：可以从这个姿态开始真跑。", flush=True)
-        print(f"报告 {args.report}", flush=True)
-        return 0
+        print(f"预检通过。报告 {preflight_report}", flush=True)
+        if args.dry_run:
+            return 0
+        try:
+            if args.side_real_trial:
+                from side_trial import FixedBaseTrial
+                trial_guard = FixedBaseTrial(resources)
+                height = trial_guard.wait_still()
+                check_start_pose()
+                print(f"底盘停稳，立柱 DDS 高度 {1000 * height:.1f} mm", flush=True)
+                message = (f"单程 {args.trial_length_cm} cm，{args.trial_speed_mm_s} mm/s 档，"
+                           "直接按回车开始试扫（输入其他内容或 Ctrl+C 取消）：")
+                if input(message) != "":
+                    raise ControlFault("操作者取消")
+                trial_guard.check()
+            check_start_pose()
+            publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
+            publisher.Init()
+            resources.callback(publisher.Close)
+            check_start_pose()
+            if trial_guard is not None:
+                trial_guard.check()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("试扫已取消，未发送运动指令")
+        except ControlFault as exc:
+            raise SystemExit(f"运动未开始：{exc}；未发送运动指令")
+        controller.complete = False
+        controller.previous = time.monotonic()
+        controller.start = controller.previous + controller.limits.startup_hold
 
+    period = .005 if args.side_real_trial else .002
     runner = Runner(controller, codec, publisher, profile,
-                    log_path=args.log, hold=args.hold).open_log()
+                    log_path=args.log, hold=args.hold, period=period).open_log()
     fault = None
     fault_detected_at = None
+    def state_for_step():
+        if trial_guard is not None:
+            trial_guard.check()
+        return cache["state"]
+
     try:
-        runner.run(lambda: cache["state"])
+        runner.run(state_for_step)
     except ControlFault as exc:
         fault = str(exc)
         fault_detected_at = time.monotonic()
@@ -181,8 +335,6 @@ def main():
         print("机器人不会再收到新的运动指令；它仍在执行上一条指令（KP/KD 未清零）。", flush=True)
     finally:
         runner.close()
-        subscriber.Close()
-        publisher.Close()
 
     report = {"network": args.network, "domain": args.domain,
               "captured_q_deg": np.degrees(captured).round(2).tolist(),
@@ -200,11 +352,17 @@ def main():
               "max_tracking_error_rad": round(runner.max_error, 4),
               "model_scan_seconds": round(motion.duration, 2),
               "final_q_deg": np.degrees(controller.last_q).round(2).tolist(),
+              "measured_final_q_deg": np.degrees(cache["state"].q).round(3).tolist(),
               "complete": controller.complete,
               "fault": fault,
               # 三个绝对时刻（CLOCK_MONOTONIC，全机可比）：注入方靠它们量"多久停的"
               "fault_detected_at": fault_detected_at,
               "last_command_at": runner.last_write_at}
+    if trial_guard is not None:
+        report["fixed_lift_start_mm"] = 1000 * trial_guard.initial_height
+        report["trial_length_cm"] = args.trial_length_cm
+        report["trial_speed_mm_s"] = args.trial_speed_mm_s
+        report["operator_confirmed"] = True
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)

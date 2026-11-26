@@ -129,7 +129,9 @@ class PhysicsBridge:
             self.column_pos = LOW_GAP_M - self.lift_nominal_gap
             self._clamp_lift()
             wall = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "wall")
-            self.model.geom_pos[wall, 0] = 0.64 + self.model.geom_size[wall, 0]
+            # 旧正面模型的墙法向为 X；侧向模型法向为 Y，不应改写它的 X 坐标。
+            if wall >= 0 and self.model.geom_size[wall, 0] < .10:
+                self.model.geom_pos[wall, 0] = 0.64 + self.model.geom_size[wall, 0]
 
         self.chassis_cmd = (0.0, 0.0, 0.0)
         self.chassis_at = None
@@ -401,6 +403,7 @@ def main():
     parser.add_argument("--network", default="lo")
     parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--no-viewer", action="store_true")
+    parser.add_argument("--scene", type=Path, help="固定立柱的仿真模型文件")
     parser.add_argument("--duration", type=float, default=0.0, help="墙钟运行秒数，0=一直跑")
     parser.add_argument("--report", type=Path, default=ROOT / "out" / "sim.json")
     parser.add_argument("--trace", action="store_true", help="每 0.5 s 打印第一个关节的目标/实际/力矩")
@@ -413,19 +416,30 @@ def main():
                              "servo=PD 保持（与真机一致，需要每拍收到固定值指令）")
     parser.add_argument("--sync-lift", action="store_true",
                         help="联动仿真：只允许 lo，使用 R1-A7-D 升降 DDS 话题")
+    parser.add_argument("--initial-lift-height-mm", type=float,
+                        help="仅联动仿真：覆盖初始 DDS 高度，用于验证自动归位")
     args = parser.parse_args()
     if args.sync_lift:
         if args.network != "lo" or args.mobile:
             parser.error("--sync-lift 仅支持 lo 上的固定轮式底盘")
         args.lift = True
 
-    scene = SCENE_LIFT if args.lift else (SCENE_MOBILE if args.mobile else SCENE)
+    if args.scene and (args.network != "lo" or args.mobile or (args.lift and not args.sync_lift)):
+        parser.error("--scene 只可用于本机回环的固定底盘或升降 DDS 仿真")
+    scene = args.scene or (SCENE_LIFT if args.lift else (SCENE_MOBILE if args.mobile else SCENE))
     bridge = PhysicsBridge(scene=scene, servo_hold=(args.hold == "servo"),
                            mobile=args.mobile, lift=args.lift, sync_lift=args.sync_lift)
     raw = json.loads((ROOT / "r1d_scan" / "robot_profile.json").read_text(encoding="utf-8"))
     pose = {k: v for k, v in raw.get("held", {}).items() if k != "note"}
     pose.update({k: v for k, v in raw.get("initial", {}).items() if k != "note"})
     bridge.apply_pose(pose)
+    if args.initial_lift_height_mm is not None:
+        if not args.sync_lift or not np.isfinite(args.initial_lift_height_mm):
+            parser.error("--initial-lift-height-mm 只接受联动仿真的有限数值")
+        from lift_dds import SIM_ZERO_GAP_M
+        bridge.column_pos = (SIM_ZERO_GAP_M + args.initial_lift_height_mm / 1000.0
+                             - bridge.lift_nominal_gap)
+        bridge._clamp_lift()
     _pose_now = {name: round(float(np.degrees(bridge.data.qpos[
         bridge.model.jnt_qposadr[mujoco.mj_name2id(bridge.model, mujoco.mjtObj.mjOBJ_JOINT, name)]])), 1)
         for name in ("left_shoulder_pitch_joint", "left_elbow_joint",
@@ -517,6 +531,10 @@ def main():
         viewer.cam.distance = 2.4
         viewer.cam.azimuth = 270     # 实测：270 才是 +y 侧（机器人左侧），90 是右侧
         viewer.cam.elevation = -8
+        if args.scene:
+            viewer.cam.lookat[:] = [0.10, 0.25, 0.78]
+            viewer.cam.azimuth = 145
+            viewer.cam.elevation = -12
     start = time.monotonic()
     physics_due = publish_due = trace_due = viewer_due = lift_due = start
     published = 0

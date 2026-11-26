@@ -5,13 +5,18 @@ cd "$(dirname "$0")"
 export PYTHONDONTWRITEBYTECODE=1
 domain="${DOMAIN:-217}"
 output="${OUTPUT:-out/sync}"
+scene="models/r1_a7_scene_side_sync.xml"
 mkdir -p "$output"
 viewer=()
 if [ "${NO_VIEWER:-0}" = 1 ]; then
     viewer=(--no-viewer)
 fi
-python3 r1d_scan/sim.py --network lo --domain "$domain" --sync-lift "${viewer[@]}" \
-    --report "$output/sim.json" > "$output/sim.log" 2>&1 &
+initial_height=()
+if [ -n "${INITIAL_HEIGHT_MM:-}" ]; then
+    initial_height=(--initial-lift-height-mm "$INITIAL_HEIGHT_MM")
+fi
+python3 r1d_scan/sim.py --network lo --domain "$domain" --sync-lift --scene "$scene" "${viewer[@]}" \
+    "${initial_height[@]}" --report "$output/sim.json" > "$output/sim.log" 2>&1 &
 sim_pid=$!
 cleanup() {
     kill "$sim_pid" 2>/dev/null || true

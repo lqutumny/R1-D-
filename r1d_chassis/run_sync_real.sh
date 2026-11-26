@@ -6,6 +6,7 @@ network="${NETWORK:-ens33}"
 domain="${DOMAIN:-0}"
 model_offset="${MODEL_OFFSET_MM:-105}"
 output="${OUTPUT:-out/sync_real_$(date +%Y%m%d_%H%M%S)}"
+echo "本次报告目录：$output"
 if [[ $# == 1 && "${1:-}" == "--dry-run" ]]; then
     exec python3 r1d_scan/sync_scan.py --network "$network" --domain "$domain" \
         --output "$output" --model-offset-mm "$model_offset" --dry-run
@@ -14,8 +15,7 @@ if [[ $# != 0 ]]; then
     echo "用法：bash run_sync_real.sh [--dry-run]" >&2
     exit 2
 fi
-echo "确认底盘停稳、立柱读数在 400 ± 10 mm 并停稳，手臂运动范围已清空，急停可用。"
-printf '确认后按回车启动，按 Ctrl+C 取消。'
-read -r _
+echo "侧向 600 mm 手臂 + 400→800→400 mm 立柱联动。"
+echo "程序先完成实时姿态和组合几何预检；回车后自动把立柱调到 400 mm，再开始联动。"
 exec python3 r1d_scan/sync_scan.py --network "$network" --domain "$domain" \
     --output "$output" --model-offset-mm "$model_offset"

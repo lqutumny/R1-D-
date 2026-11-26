@@ -1,237 +1,226 @@
-# R1-D 集装箱箱面辐射扫描
+# 01 手臂动作与升降柱联动
 
-> 本源码副本包含代码、必要说明和模型，现场数据与运行输出保存在原部署环境。
+新方案要求机器人左侧朝箱，身体正前方与箱面平行，左手探头检测面正对箱面。底盘停稳后沿同一列竖直扫动，探头端面到箱面的名义工作距为 200 mm。先在 Ubuntu 的 `~/r1d_chassis` 开发和验证，再同步代码、模型、配置及验证说明到 Windows 工作区。跨对话安排见[项目总纲](../../AGENTS.md)。
 
-宇树 **R1-A7-D**（单臂 7 自由度）二次开发：用**左臂**带动辐射检测模块，
-让探头端面在**一个竖直平面内上下扫动**（行程 50 cm），后期用辐射检测仪替换灵巧手。
+## 左侧朝箱改造阶段
 
-> **状态**：手臂扫描真机已跑通（柔顺版 20.2 mm/s、直线度 5.5 mm）；保护项注入测试 30/30。
-> **底盘**（阶段 6）仿真里已能按指令行走，真机未动，见 [`docs/chassis.md`](docs/chassis.md)。
-> 真机阶段尚未开始——`robot_profile.json` 里的槽位与 KP/KD 仍是暂定值，**程序会拒绝在真机上启动**（见下）。
+| 阶段 | 验收结果 |
+| --- | --- |
+| 1. 固定立柱，设计左臂轨迹并跑完整仿真 | 通过。当前默认单程 600 mm，规划峰速约 51 mm/s，整轮约 56.7 s。 |
+| 2. 固定立柱，做左臂真机验证 | 通过。600 mm、51 mm/s 平顺组及加速抬臂/收纳版已完整运行，现场确认动作平顺、无控制故障。 |
+| 3. 接回升降柱联动 | 已实现自动归位 400 mm 后执行 400→800→400 mm。两轮真机均完成自动归位和正式上下扫，其中一轮完整收纳，另一轮在收纳阶段被 201 ms DDS 瞬时超时保护停止；需继续提高连续运行稳定性。 |
 
+## 第 1 阶段：左侧朝箱、固定立柱单臂仿真（2026-11-26）
 
-## 手臂与立柱联动仿真
+### 当前方案：60 cm 单程与速度调校
 
-在 Ubuntu 虚拟机桌面终端运行：
+按负责人要求，单程设为 **600 mm**。模型高度 Z = 585–1185 mm，沿用 X = 160 mm、Y = 384 mm 的同一列，箱面在 Y = 584 mm，名义端面工作距 200 mm。固定立柱仍采用上轮仿真的模型高度。
 
-```bash
-cd ~/r1d_chassis
-MUJOCO_GL=glfw bash run_sync_sim.sh
-```
+四组参数用同一站位和 600 mm 轨迹分别跑闭环。单程时间来自指令时序，整轮时间含接近、收纳和末端保持。速度误差为反馈与参考的竖直速度之差，用 160 ms 时间窗计算，表中取上扫和下扫 P95 的较大值。jerk 为整轮指令的关节加速度变化率峰值。
 
-从 SSH 启动图形窗口时加 `DISPLAY=:0`。只需记录数据时用
-`NO_VIEWER=1 bash run_sync_sim.sh`。联动入口固定使用本机回环，
-默认 DDS 域为 `217`。报告、手臂和立柱 CSV 保存在 `out/sync/`。
+| 方案 | 单程 | 整轮 | 指令 jerk 峰值（rad/s³） | 反馈竖直速度误差 P95（mm/s） | 最大关节跟踪误差（rad） |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 原参数 | 15.86 s | 66.59 s | 1.29 | 6.81 | 0.0228 |
+| 平顺提速组 | 13.95 s | 56.74 s | 0.76 | 7.94 | 0.0268 |
+| 较高峰速组 | 12.56 s | 53.05 s | 0.74 | 14.71 | 0.0623 |
+| 高速组 | 11.21 s | 47.27 s | 0.84 | 12.84 | 0.0382 |
 
-抬臂和收纳期间立柱停在低位。正式上扫约 16.22 s 内，左臂沿既有轨迹
-上扫约 50 cm，立柱的 DDS 高度读数同步从 400 mm 升到 700 mm。换向后
-两者同步返回，探头名义竖直覆盖约 80 cm。`models/sync_scan_profile.json` 来自
-`r1d_radiate_scan_fast_stable` 的 16.22 s 方案。
+默认选用**平顺提速组**。探头峰速上限 53 mm/s，规划实际峰速 50.9 mm/s。接近与收纳限速 0.25 rad/s，扫描时序平滑窗 0.65 s。相比同为 600 mm 的原参数，整轮缩短 9.9 s（15%），指令 jerk 峰值下降 41%。反馈速度误差小于另外两组提速方案。
 
-联动仿真使用 `rt/cmd_vel` 的 `Twist_.linear.z` 发归一化升降速度，
-用 `rt/height_state` 的 `Point32_.z` 毫米读数闭环，并读取
-`rt/state_vel` 和 `rt/height_alarm`。仿真把机械低位 100 mm 上方的
-5 mm 作为读数原点，台架刻度和真机偏移须另行核实。立柱是带小幅响应滞后的
-运动学模型，不能用来判断真机的振动、停止距离或话题兼容性。
+- 默认入口复测完成。上扫 600.0 mm，下扫 600.0 mm。端面工作距 199.7–200.4 mm，轴线最大偏差 0.24°，最大偏离目标竖线 0.69 mm。
+- 顶部换向前后各 250 ms 的平均竖直速度为 +0.13 / -0.01 mm/s。仿真反馈最小关节余量 4.97°，与底座及立柱的最小模型间隙 13.8 mm，全程未检出碰撞。结束时探头轴线距竖直向下 0.17°。
+- 控制保护、底盘和立柱离线回归合计 29/29 项通过。侧对运动入口继续使用本机回环仿真。
 
-### 查看立柱高度反馈
-
-联动仿真运行时，在另一个终端执行：
+在 Ubuntu 桌面打开图形仿真。
 
 ```bash
 cd ~/r1d_chassis
-python3 tools/read_lift_height.py --network lo --domain 217 --seconds 30
+MUJOCO_GL=glfw OUTPUT=out/side_scan_60_gui bash run_side_sim.sh
 ```
 
-诊断工具只订阅，显示 `rt/height_state.z` 的毫米原始值，并统计速度和告警反馈。
-仿真中 505–805 mm 的模型间隙对应 400–700 mm 的话题值。
-真机可按现场 DDS 配置改用 `--network ens33 --domain 0`。
-用 `--report out/lift_height.json` 可保留各话题的帧数、频率和测量范围。
-手动遥控升降时可用 `--seconds 0` 持续查看，停稳后按 Ctrl+C 结束并保存报告。
-真机机身到底盘板的间隙需量尺标定参考偏移。
-
-### 真机联动入口
-
-先用遥控器将立柱停在 **DDS 读数 400 ± 10 mm**。将底盘停稳，让手臂进入
-原扫描项目使用的开发模式。启动前可运行只读预检：
+只跑数据时使用下面的命令。
 
 ```bash
 cd ~/r1d_chassis
-NETWORK=ens33 DOMAIN=0 bash run_sync_real.sh --dry-run
+NO_VIEWER=1 OUTPUT=out/side_scan_60_recheck bash run_side_sim.sh
+cat out/side_scan_60_recheck/side_geometry.json
 ```
 
-预检通过后，使用 `NETWORK=ens33 DOMAIN=0 bash run_sync_real.sh` 并确认启动。
-程序根据当前左臂姿态规划到 50 cm 扫描线下端，停稳后和立柱同步上扫、换向和下扫。
-立柱回到低位并停稳后，手臂将探头竖直收纳。报告位于 `out/sync_real_*/`。
+上一轮 680 mm 结果见下。此次四组对比和默认入口复测的原始报告在 Ubuntu `~/r1d_chassis/out/side_scan_60/`，各次运行分别保留预检、反馈和控制状态。
 
-400 和 700 mm 是真机 DDS 原始读数。组合几何预检暂以 105 mm 为模型偏移，
-实际机身到底盘板的参考偏移仍需测量。测得后可以用 `MODEL_OFFSET_MM` 设置，
-控制目标仍以 DDS 原始读数为准。真机的自动升降响应、制动和同步到位还需实测。
+### 680 mm 行程上限探索（历史记录）
 
-## 这个项目解决什么问题
+**历史闭环结果：单程 680 mm 通过。** 相比原 500 mm 基准增加 180 mm（36%），下端保持原基准相对机身的高度，增加的行程全部来自上端。
 
-被控对象不是"手腕"，而是"探头端面"：手腕和探头之间差一个沿工具轴的偏移，
-而且探头朝向必须固定，否则"点走直线"会变成"端面画弧"。所以：
+- 模型坐标 +X 为机器人正前方，与箱面平行，+Y 为机器人左侧。箱面近侧位于 Y = 584 mm，探头外端面中心扫描线为 X = 160 mm、Y = 384 mm、Z = 585–1265 mm，Z 以模型地面为零。探头轴线朝 +Y，名义工作距 200 mm。
+- 场景固定平移底盘与立柱。模型机身与底座间隙取 505 mm，沿用既有 DDS 400 mm 对应的仿真假设，真机要核对实际安装高度。
+- 从捕获姿态规划接近，低端整定 0.8 s 后上扫，顶部减速至近零后反向，下扫回低端后收纳，最后保持探头竖直向下。扫描复用原有速度、关节加速度和 jerk 约束。创建运动发布器前，先按本轮初始姿态做全程几何预检，首次预检发送指令 0 条。
+- 网格先扫 16 个站位，再细化 25 个站位。初筛找到 Z = 585–1285 mm 的连续逆解（约 700 mm），一些 650 mm 候选经平滑后已低于本阶段 4° 余量。在所选站位把参考点校正到探头外端面后，680 mm 通过完整仿真，再向上试 10 mm 时，逆解残差 2.3 mm 超过 2 mm 搜索门槛。
 
-- 约束是 **5 个**（TCP 位置 3 + 探头轴线 2），而左臂有 **7 个**自由度 → 2 个冗余自由度用来躲限位、避奇异。
-- 7 轴臂的逆解不唯一，逐点独立求解会让腕部在零空间里漂移（实测漂了 72°）。这里用**微分连续推进**
-  （阻尼最小二乘 + 量纲加权）保证相邻点解连续。
-- "10 cm 精度"拆成两个数：**直线度 20 mm**（代码的责任）+ **绝对位置 100 mm**（站位与标定的责任）。
+| 反馈轨迹 | Z 区间（mm） | 单程（mm） | 端面工作距（mm） | 最大轴线偏差 | 最大偏离竖线 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 上扫 | 585.0–1264.8 | 679.8 | 199.7–200.3 | 0.15° | 0.64 mm |
+| 下扫 | 585.0–1264.8 | 679.9 | 199.7–200.4 | 0.13° | 0.76 mm |
 
+- 预检最小关节余量 4.98°，闭环反馈最小余量 4.97°。全程记录未检出碰撞，左臂或探头与底座及立柱几何的最小模型间隙 13.8 mm。最后探头轴线距竖直向下 0.17°。
+- 顶部换向前后各 250 ms，探头平均竖直速度为 +0.23 / -0.04 mm/s。指令单程 19.07 s，整轮含结束保持 73.00 s。底盘与立柱离线回归合计 9/9 项通过。
 
-## 目录结构
+该轮闭环报告保存在 Ubuntu `~/r1d_chassis/out/side_scan_stage1_final/`。
 
-```
-r1d_radiate_scan/
-├── docs/
-│   ├── install.md            # 环境搭建（Ubuntu 22.04 / MuJoCo / unitree_sdk2py）
-│   ├── architecture.md       # 代码结构、数据流、控制回路、如何扩展
-│   ├── hardware.md           # 机型/槽位/限位/探头参数 + 站位卡与轨迹指标
-│   ├── testing.md            # 保护项清单与注入测试 + 真机核对作业单
-│   └── results.md            # 需求对照（验收结论）+ 五次真机试验记录
-├── models/
-│   ├── r1_a7.urdf            # 官方 R1-A7 URDF（unitree_ros）
-│   ├── meshes/               # 官方 STL（19 个）
-│   ├── r1_a7_scene.xml       # 由 build_scene.py 生成：整机 + 探头 + 箱面
-│   ├── chassis.json          # 底盘限幅与假设参数（体积/质量待实测）
-│   ├── r1_a7_scene_mobile.xml # 移动底盘场景（build_scene.py --mobile 生成）
-│   ├── scan_profile.json     # 101 点扫描轨迹（关节角序列）
-│   └── simulation.json       # 场景清单：nq/nu、锁了哪些关节、执行器力矩上限
-├── r1d_scan/                 # 运行时库
-│   ├── robot_profile.json    # 关节名/槽位/KP-KD/保持关节（真机前必须核对）
-│   ├── profile.py            # profile 读取与校验
-│   ├── kinematics.py         # 7 轴 IK：微分连续推进 + 量纲加权
-│   ├── path_timing.py        # 路径时间参数化（LP + 极值复核）
-│   ├── controller.py         # 状态机 + 全部 Guard
-│   ├── runner.py             # 控制主循环（不含 DDS，可单测）
-│   ├── transport.py          # LowCmd/LowState 编解码 + CRC
-│   ├── scan.py               # 控制程序（唯一接 DDS 的运动入口）
-│   ├── sim.py                # MuJoCo 仿真器（订阅 lowcmd、发布 lowstate）
-│   ├── fake_robot.py         # 假机器人：按需注入坏状态
-│   ├── chassis.py            # 底盘：agv 服务封装 + 限幅 + 看门狗
-│   ├── lowstate.py           # LowState → 字典（离线分析用）
-│   └── dds_network.py        # 网卡与 DDS 域初始化
-├── tools/
-│   ├── build_scene.py        # URDF → MuJoCo 场景（含保持关节自检）
-│   ├── scan_workspace.py     # 可达性/站位扫描
-│   ├── scan_plan.py          # 生成扫描轨迹 → models/scan_profile.json
-│   ├── tune_gains.py         # 按目标阻尼比标定模型阻尼
-│   ├── measure_step.py       # 从 STEP 文件量探头外形（不需要 CAD）
-│   ├── check_urdf.py         # URDF 自检
-│   ├── inspect_device.py     # 真机只读采集（窗口内统计；不 import 任何 publisher）
-│   ├── analyze_device.py     # 采集结果 → 六列对照表草稿
-│   ├── watch_lowcmd.py       # 接管前检查通道上有没有别人在发指令
-│   ├── nudge.py              # 分级接管：抓取 / 单关节微动
-│   ├── check_run.py          # 运行后复盘：逐关节指令 vs 实测
-│   ├── tcp_from_csv.py       # 用实测关节角反算 TCP 轨迹与直线度
-│   ├── chassis_demo.py       # 底盘动作演示（走直线/转向）
-│   ├── test_chassis.py       # 底盘通道测试（限幅/服务缺失/端到端）
-│   ├── repeatability.py      # 多轮运行之间的散差
-│   ├── fault_injection.py    # 保护项注入测试（三层）
-│   └── fetch_urdf.sh         # 官方 URDF 下载脚本（记录模型来源）
-├── run_demo.sh               # 仿真跑一轮
-├── run_real.sh               # 真机一条龙（检查 → 抓取 → 扫描 → 汇总）
-└── run_fault_tests.sh        # 全套保护项注入测试
-```
-
-`out/` 是运行产物目录（报告、CSV、截图），已在 `.gitignore` 里，不提交。
-
-## 快速开始
-
-环境见 [`docs/install.md`](docs/install.md)。装好后：
+用同一模型重新生成所选站位的逆解和轨迹（写入独立目录）：
 
 ```bash
-bash run_demo.sh                 # 仿真里跑完整一轮（约 70 s，弹窗口）
-bash run_fault_tests.sh          # 保护项注入测试（约 110 s，20 项）
-bash run_real.sh                 # 真机：现场检查 → 预检 → 抓取 → 扫描 → 汇总
-PASSES=3 bash run_real.sh        # 真机连扫 3 趟
-
-# 只预检不动：用机器人实测姿态把整轮时间轴离线走一遍，一条指令都不发
-python3 r1d_scan/scan.py --network ens33 --domain 0 --dry-run --report out/pre.json
+cd ~/r1d_chassis
+python3 tools/plan_side_scan.py --output out/side_scan_plan --x .16 --y .384 --random-seeds 12
+python3 tools/build_side_profile.py --candidates out/side_scan_plan/candidates.json --x .16 --y .384 --length .68 --scene out/side_scan_plan/scene.xml --profile out/side_scan_plan/profile.json
 ```
 
-底盘（阶段 6，目前只在仿真）。**升降柱伸缩**（实际要做的）：
+第 2 阶段现场需核对腕部安装面到探头外端面的实际尺寸、周边突出件和线缆，以及确实可固定在目标高度、实现左侧平行停车的场地条件。现有仿真用腕端至探头外端面 194 mm、质量 1.5 kg 的简化外形。最小底座间隙来自仿真，真机以标定和低速短程逐步扩展后的结果为准。
+
+## 第 2 阶段：真机只读预检（2026-11-26）
+
+- 首次立柱反馈共 749 帧，记录到 328.76–424.28 mm 的调高过程。随后独立做 10 秒只读复核，收到 500 帧，稳定在 DDS 397.07 mm，速度反馈全零，无立柱告警。
+- 使用真机当前关节姿态对 600 mm 轨迹做整轮模型预检，通过，报告 `published_commands = 0`，最小关节余量 4.98°。此记录用于确认起始姿态能规划接近与收纳。
+- Ubuntu 报告位于 `~/r1d_chassis/out/side_lift_height_real.json`、`~/r1d_chassis/out/side_lift_height_real_hold.json`、`~/r1d_chassis/out/side_preflight_real_60.json`。下一项为核对探头实际装配尺寸和现场左侧平行站位，再安排固定立柱的低速短程试扫。
+
+### 第 2 阶段首轮：空旷地带短程动作试扫
+
+负责人现场使用无外露线缆的替代件，腕端至前端估计 150–200 mm。参考 STEP 装配保守外形约 190 × 70 × 86 mm。首轮几何采用 205 mm 轴向包络和 126 × 126 mm 横截面，立柱模型按试扫许可区间的低端摆放。此轮在空旷地带观察动作。
+
+- 一个上下往返，单程 150 mm，探头指令峰速上限 16 mm/s，抬臂与收纳限速 0.12 rad/s。立柱和底盘固定，启动及运行期间只读检查停稳、高度与反馈状态。
+- DDS 立柱允许范围为 390–410 mm，运行中高度相对起点变化超过 3 mm、底盘或立柱运动、告警或反馈超时会停止发布运动指令。
+- 专用入口闭环仿真整轮 77.04 s，收纳完成，未检出模型碰撞，最小底座及立柱模型间隙 13.8 mm。真机当前姿态对短程轨迹只读预检通过，发送运动指令 0 条，最小关节余量 12.31°，立柱只读复核 397.08 mm。现场实际动作待确认。
 
 ```bash
-python3 tools/build_scene.py --lift                 # 一次性：生成伸缩场景
-python3 r1d_scan/sim.py --network lo --domain 215 --lift   # 终端 1
-python3 tools/lift_demo.py --network lo --domain 215 \
-    --plan up:0.10,wait:1,down:0.05                  # 终端 2：升 10 cm 再降 5 cm
-python3 tools/test_lift.py                          # 12 项，18 s
+cd ~/r1d_chassis
+bash run_side_real_trial.sh
 ```
 
-底盘平移（`Move`，顺带做的，暂不作为主线）：
+默认报告位于 Ubuntu `~/r1d_chassis/out/side_trial_real/`。仿真和真机只读证据位于 `~/r1d_chassis/out/side_scan_real_trial_prep/`。
+
+#### 首次现场中止与重试（2026-11-26）
+
+首轮在接近段因 10 秒内 5 次控制周期超过 50 ms 停止。重启时，126 × 126 mm 替代件方盒在捕获姿态与立柱左外壳模型重叠约 20 mm。现场观察替代件实际未接触。
+
+重试按 STEP 外形把试扫模型横截面改为 72 × 88 mm，保留 205 mm 轴向包络，底座碰撞检查仍在。按同一姿态重新计算，最小模型间隙约 2.0 mm，真机只读整轮预检通过，发出运动指令 0 条，最小关节余量 9.08°。另用模型重叠姿态验证碰撞保护仍会拦截。
+
+专用试扫发布频率改为 200 Hz，保留原停顿保护。回环闭环复测完整收纳，用时 77.05 s，实测发布率 195.1 Hz，最长控制周期 57.6 ms。15 cm 现场重试已完成，详见下节。
 
 ```bash
-python3 tools/build_scene.py --mobile              # 一次性：生成移动底盘场景
-python3 r1d_scan/sim.py --network lo --mobile      # 终端 1：仿真器托管 agv 服务
-python3 tools/chassis_demo.py --network lo --plan forward:0.4,left:90,forward:0.4   # 终端 2
-python3 tools/test_chassis.py                      # 13 项通道测试，17 s
+cd ~/r1d_chassis
+OUTPUT=out/side_trial_real_retry bash run_side_real_trial.sh
 ```
 
-`run_demo.sh` 会自己拉起 MuJoCo 仿真器、等它就绪、跑控制器、收尾关窗。期望输出：
+重试使用独立输出目录保留首轮记录。回环复测与真机只读报告位于 Ubuntu `~/r1d_chassis/out/side_trial_retry_check/`。
 
+#### 60 cm 真机试扫入口与回车确认（2026-11-26）
+
+15 cm 空旷地带重试已在真机完成，整轮 76.98 s，立柱起始读数 404.18 mm，无控制故障。60 cm 阶段沿用固定底盘、固定立柱和替代件模型，探头指令峰速上限 25 mm/s，单程 26.74 s。
+
+试扫预检通过后等待终端回车。单独回车才会继续，输入其他内容或按 Ctrl+C 可取消。回车后重新检查手臂姿态、底盘及立柱反馈，通过后才创建运动发布器。等待期间动过手臂或底盘，应重新运行命令。
+
+60 cm 已用真机当前姿态完成只读预检，发送指令 0 条，最小关节余量 4.98°。回环验证了等待和取消，并在确认后完成一轮，上扫 600.0 mm、下扫 600.0 mm，整轮约 108.4 秒。25 mm/s 档的 60 cm 真机验证已完成，详见下一节。
+
+```bash
+cd ~/r1d_chassis
+OUTPUT=out/side_trial_real_60 bash run_side_real_trial.sh --trial-length-cm 60
 ```
-阶段： startup-hold(0.0s) → approach(2.0s) → scan-up(7.6s) → scan-down(43.9s)
-       → return(80.2s) → finished-hold(85.7s)
-指令 3.7 万条，最大跟踪误差 0.023 rad，complete=True
-最终关节角(deg)： [10.0, 0.0, 0.0, 60.0, 0.0, 0.0, 0.0]
+
+沿用默认 15 cm 的命令也会等待回车。60 cm 真机报告将保存于 Ubuntu `~/r1d_chassis/out/side_trial_real_60/`，回环和只读预检证据位于 `~/r1d_chassis/out/side_trial_60_verify/`。
+
+#### 60 cm 真机 51 mm/s 提速档（2026-11-26）
+
+60 cm 的 25 mm/s 档已完成真机往返及收纳，整轮 109.51 s，无控制故障。新增提速档复用 0.65 s 平滑窗口，配置速度上限 53 mm/s，规划峰速 50.9 mm/s。抬臂、收纳限速仍为 0.12 rad/s。底盘和立柱保持固定，启动需要终端回车确认。
+
+提速档以现场返回的关节姿态完成只读预检，发送运动指令 0 条。已验证显示 51 mm/s 提示、回车，以及 82.79 s 的完整回环仿真。上扫 600.0 mm，下扫 600.0 mm，仿真全程未检出碰撞。原版提速档真机已完成，见下一节。
+
+```bash
+cd ~/r1d_chassis
+OUTPUT=out/side_trial_real_60_51 bash run_side_real_trial.sh --trial-length-cm 60 --trial-speed-mm-s 51
 ```
 
-`complete=True` + 最终关节角回到 `[10,0,0,60,...]°` = 这一轮走完整、回到了初始下垂姿态。
+默认 60 cm 命令使用 25 mm/s 档。51 mm/s 档的真机日志将保存到 Ubuntu `~/r1d_chassis/out/side_trial_real_60_51/`，只读和回环验证位于 `~/r1d_chassis/out/side_trial_51_verify/`。
 
-## 工作原理（三段）
+#### 51 mm/s 真机结果、抬臂收纳提速与预检优化（2026-11-26）
 
-1. **规划**：`scan_plan.py` 用 `kinematics.py` 把"探头端面沿竖直线走 50 cm"翻译成 7 个关节的角度序列
-   （101 个节点），再用 `path_timing.py` 给它打时间戳（单程 21.6 s，运行时约 24.6 s）。
-2. **控制**：`scan.py` 按 2 ms 周期把关节角写进 `rt/lowcmd`（HG 协议，含 CRC），
-   同时订阅 `rt/lowstate` 拿实测角做闭环。状态机：保持 → 接近 → 上行 → 下行 → 回位 → 保持。
-3. **仿真**：`sim.py` 就是这个"机器人"——它订阅 `rt/lowcmd`，按 PD 力矩驱动 MuJoCo，发布 `rt/lowstate`。
-   两个进程走真实的 DDS 协议，所以**换成真机只是把 `--network lo` 换成网卡名**。
+原版 51 mm/s 真机跑完整轮并收纳，用时 83.09 s，无控制故障，最大跟踪误差 0.0502 rad。用户看到的终端提示待核对原文。只读复现时，SDK 关闭 DDS 读通道可出现 `[Reader] take sample error`。专用入口现在会在通道关闭后输出明确的完成状态和报告路径。
 
-`scan.py` 与真机之间没有任何"仿真专用"分支；保护项（超时/CRC/故障字/温度/限位/角速度/力矩/跟踪误差/
-模式变化）在仿真里全部被真实触发过，见 [`docs/testing.md`](docs/testing.md)。
+- 51 mm/s 档抬臂与收纳关节限速由 0.12 升到 0.22 rad/s，仍使用七次平滑过渡。按同一真机起始姿态的只读规划，抬臂 25.55 → 13.94 s，收纳 25.64 → 13.98 s。上下扫沿用原时序。
+- 启动批量采样关节轨迹，复用一次加载的 MuJoCo 模型，跳过包围球已经分离的无接触配对。仍按原 2 ms 时间网格和约 10 ms 几何采样检查，并用 MuJoCo 查询可能接触的配对。回车后立即复核姿态、底盘和立柱反馈，复用已完成的停稳检查。对照了共 15,361 个标量及批量参考点和 8,847 个碰撞判断姿态。
+- Ubuntu 实读启动从 14.26 s 降至约 8 s，回环从启动到回车提示约 6.5 s。提速版真机只读通过，发送运动指令 0 条，回车后的回环闭环 60.02 s，完成收纳，未检出碰撞。新抬臂和收纳速度待现场验证。
 
-## 真机安全声明
+```bash
+cd ~/r1d_chassis
+set -o pipefail
+mkdir -p out/side_trial_real_60_51_fast
+OUTPUT=out/side_trial_real_60_51_fast bash run_side_real_trial.sh \
+  --trial-length-cm 60 --trial-speed-mm-s 51 2>&1 | tee out/side_trial_real_60_51_fast/terminal.log
+```
 
-- `robot_profile.json` 的 `slot_source` 现为 `verified`（槽位已在真机只读核对过）。
-  `scan.py` 在**非 `lo` 网卡**上仍会检查这一项，未核对就直接退出，**一条指令都不会发**。
-- `--dry-run` 是同一份代码的"只规划"模式：用机器人实测姿态把整轮时间轴离线走完，
-  报告里 `published_commands` 恒为 0。`run_real.sh` 已把它放在抓取之前做闸门。
-- 真机前必须完成只读核对（`tools/inspect_device.py` 只订阅 `rt/lowstate`，不含任何 publisher）：
-  槽位归属、关节方向、限位、`mode_machine`、腰 yaw 的槽位。
-- 保护触发时的行为是**停止发送、不清零 KP/KD**（机器人保持最后一条指令），不是急停。
-  现场必须另有硬件急停，并由专人负责。
-- 扫描时人员不得进入机器人工作范围。
+本次优化证据位于 Ubuntu `~/r1d_chassis/out/side_trial_51_fast_setup/`，下一轮终端输出和控制报告会另存，以便确认警告来源。
 
-## 已知限制
+#### 加速版现场日志复核（2026-11-26 11:26）
 
-| 项 | 现状 | 说明 |
-|---|---|---|
-| 探头模型 | 真件 126×126×190、探测面 Ø47、1.5 kg | 质量与质心仍是估值，用户决定不再核对 |
-| 指令频率 | 309–350 Hz | 虚拟机 `time.sleep` 粒度所限；原生 Linux 预期接近 500 Hz |
-| 力矩预算 | URDF effort × 0.9 | 实测峰值：肩 pitch 9.5/60（16%）、腕 pitch 1.9/10（19%）→ 不是瓶颈 |
-| 左腕 pitch 限位 | **±43°（实测硬限位）** | URDF 的 ±92.5° 作废；决定站位与速度 |
-| 扫描速度 | **实测 0.0202 m/s**（24.6 s 单程） | 已进入 0.02–0.05 区间下沿；提速会放大轴线误差 |
-| 精度 | 真机柔顺版 **5.5 mm 直线度 / 8.05° 轴线**（旧轨迹 4.8 / 5.77） | 轴线余量只剩 2°；绝对定位未测（用户判定无需） |
-| 重复性 | 三轮散差 2.9 mm | 通过 |
-| 底盘 | 仿真运动学模型（无轮地摩擦/惯性耦合） | 真机未动；轮径轮距质量未实测 |
+Ubuntu `~/r1d_chassis/out/side_trial_real_60_51_fast/` 曾有一轮在抬臂阶段因「升降反馈缺失或超时」停止。随后同一输出目录的重跑已完整覆盖该记录：启动预检 6.37 s，运行 60.59 s，完成抬臂、600 mm 上下扫和收纳；`complete=true`、`fault=null`，最大跟踪误差 0.0553 rad。负责人现场确认动作完成、无控制故障，并将当前 600 mm 平顺组作为固定立柱阶段的基本方案。
 
-## 文档索引
+中止后对高度、速度和告警做过 12 s 只读复查，三个话题各 599 帧，约 50 Hz，立柱稳定在 DDS 404.18 mm，速度全零，无告警。原中止记录未区分哪一路话题曾超时。完整动作仍以控制报告 `complete=true` 且 `fault=null` 为准。
 
-| 想了解 | 看 |
-|---|---|
-| 环境怎么搭、常见报错 | [`docs/install.md`](docs/install.md) |
-| 代码怎么组织、想改哪里 | [`docs/architecture.md`](docs/architecture.md) |
-| 机型参数、槽位、右臂怎么保持 | [`docs/hardware.md`](docs/hardware.md) |
-| 站位、可达范围、轨迹指标 | [`docs/hardware.md`](docs/hardware.md) |
-| 探头怎么装的、实测尺寸 | [`docs/hardware.md`](docs/hardware.md) §7 |
-| 真机核对怎么一步步做 | [`docs/testing.md`](docs/testing.md) |
-| 保护项怎么测的、停多快 | [`docs/testing.md`](docs/testing.md) |
-| 底盘怎么动、接口是哪几个 | [`docs/chassis.md`](docs/chassis.md) |
+#### 任意合法静止姿态接近与一键启动（2026-11-26）
 
-## 数据来源
+固定立柱 600 mm 平顺组新增一键入口。程序连续观察 250 ms 的 LowState 静止反馈，直接以左臂实时关节角作为起点，规划到既定 600 mm 轨迹下端点；不再要求先手动摆回典型下垂姿态。接近路径、完整扫描和收纳仍检查关节限位、速度/加速度/jerk、箱面距离和组合几何。“任意姿态”指模型限位内、当前无碰撞且已经静止的合法姿态；超限、模型碰撞、反馈异常或仍在运动时仍会拒绝执行。
 
-- 机器人模型：`unitreerobotics/unitree_ros` → `robots/r1_a7_description/r1_a7.urdf`（+ 对应 mesh）。
-- 低层协议：`unitree_sdk2py`（HG 系列 `rt/lowcmd` / `rt/lowstate`，含 CRC 与 `mode_machine` 回显）。
-- 仿真器：MuJoCo 3.17。
+为减少等待和瞬时 DDS 抖动造成的无效启动：启动保持 2.0 → 0.75 s，下端稳定 0.8 → 0.6 s，固定立柱停稳观察 0.75 → 0.40 s；固定立柱只读守护允许 500 ms 的偶发反馈间隔，并在故障中指出高度、速度或告警哪一路过期。该阶段不发送立柱命令；后续升降联动仍保留原 200 ms 超时保护。真机启动预检使用 5 ms 关节导数网格和 20 ms 几何网格，路径规划器仍以约 0.7° 关节分辨率逐段检查组合几何。
+
+```bash
+cd ~/r1d_chassis
+bash run_scan60_real.sh
+```
+
+入口自动创建 `out/scan60_real_年月日_时分秒/`，保存 `terminal.log`、`preflight.json`、`scan_report.json` 和 `arm.csv`，并返回控制程序的真实退出码。预检通过后仍需在终端单独按一次回车才会发送手臂命令。
+
+离线用自然下垂、固定收纳、现场捕获姿态以及扫描下端/中段/上端共六种合法起点验证，均规划到同一低端点；人为超限姿态被拒绝。真机网卡只读预检用时 5.4 s、发送指令 0 条。回环完整运行 58.57 s，完成上下扫和收纳，`complete=true`、`fault=null`。证据分别在 Ubuntu `out/adaptive_start_offline.json`、`out/adaptive_start_readonly/` 和 `out/adaptive_start_loopback/`。本轮新启动参数尚待真机从不同初始姿态做逐项复测。
+
+## 第 3 阶段：侧向 600 mm 手臂与升降柱联动（2026-11-26）
+
+联动控制使用第 2 阶段真机确认的侧向 600 mm、51 mm/s 平顺组。执行命令后直接读取立柱高度；预检通过并回车后，保持双臂当前姿态，自动把立柱闭环调整到 400 ± 2 mm 并确认停稳。随后手臂接近扫描下端；正式上扫时手臂向上 600 mm、立柱同步从 400 升至 800 mm，到顶同时换向；下扫时两者同步回到各自低点。名义单列总覆盖约 **1000 mm**，不再要求人工读取或预调高度。
+
+新增 `models/r1_a7_scene_side_sync.xml`，同时包含左侧箱面、替代探头、升降柱关节及底座外形。60 ms 高度误差修正滤波已合并到 Ubuntu 运行版；速度前馈、200 ms 反馈超时、20 mm 跟踪误差、到顶/回低位停稳检查、告警停止和结束三次零速命令均保留。报告新增起步、到顶换向、回低位三个同步检查点，并记录立柱误差、探头 Z 误差和实际组合覆盖。
+
+初版 400→700→400 mm 已完成真机联动：`complete=true`、`fault=null`，立柱最大跟踪误差 1.57 mm，到顶误差 −1.06 mm，回低位误差 +0.32 mm，实测模型反算总覆盖 896.49 mm；探头在起步、到顶、回低位的 Z 误差分别为 +0.39、−3.64、−0.00 mm。
+
+新版用 650 mm 初始高度验证自动流程：9.88 s 自动降至 400.79 mm并停稳，随后完成 400→800→400 mm 联动；`complete=true`、`fault=null`，名义覆盖 999.99 mm，立柱最大跟踪误差 1.05 mm，到顶误差 +0.35 mm，回低位误差 −0.36 mm。自动归位全过程保持手臂，归位后再用实测姿态复核组合碰撞；自动归位仅接受 300–850 mm 的可信起始高度，超出范围时拒绝运动。
+
+当前真机反馈的新版只读预检通过，`published_commands=0`：立柱起始 424.98 mm，规划自动下降 24.98 mm；400→800→400 mm 名义覆盖 999.99 mm、工作距 199.99 mm、到升降管最小模型间隙 22.47 mm。证据位于 Ubuntu `out/sync_real_20261126_164132/`、`out/side_sync_800_auto_entry_retry/` 和 `out/side_sync_800_real_readonly/`。
+
+正式真机连续运行两轮：第一轮从 363.31 mm 自动升至 398.11 mm，用时 2.12 s，随后完成 400→800→400 mm、手臂收纳和程序收尾；`complete=true`、`fault=null`，立柱最大跟踪误差 2.14 mm，到顶误差 −0.86 mm，回低位误差 +0.27 mm，模型反算实际覆盖 997.54 mm。第二轮从 586.05 mm 自动降至 401.56 mm，用时 7.67 s，上下扫和回 400 mm 均完成，模型反算覆盖 997.38 mm；收纳阶段高度与速度反馈同时达到 201 ms，刚超过 200 ms 保护阈值，程序按设计停止，`complete=false`。因此自动归位和扩展扫描功能已经实现，但 DDS 瞬时超时仍是下一项稳定性优化重点。证据为 Ubuntu `out/sync_real_20261126_170105/` 与 `out/sync_real_20261126_170247/`。
+
+## 日常调试入口
+
+在已配置好依赖的 Ubuntu 环境中，从本模块目录执行。沿用原虚拟机部署时，工作目录为 `~/r1d_chassis`。
+
+| 要做的事 | 命令或文件 |
+| --- | --- |
+| 联动仿真 | `bash run_sync_sim.sh`；无窗口使用 `NO_VIEWER=1 bash run_sync_sim.sh`。默认使用回环网卡和 DDS 域 217。 |
+| 在另一终端只读查看仿真高度 | `python3 tools/read_lift_height.py --network lo --domain 217 --seconds 30` |
+| 检查联动结果 | 默认输出到 `out/sync/`，查看 `sync_report.json`、`arm.csv` 和 `lift.csv`。 |
+| 调整联动轨迹与时序 | 从[联动控制](r1d_scan/sync_scan.py)及[600 mm 侧向轨迹](models/side_trial_60_51_profile.json)入手；运动反馈与限幅见[立柱接口](r1d_scan/lift_dds.py)。 |
+| 测单臂与保护项 | 单臂仿真用 `bash run_demo.sh`，保护项测试用 `bash run_fault_tests.sh`，单臂现场流程见 [run_real.sh](run_real.sh)。 |
+
+## 真机预检和运行
+
+1. 核对现场网卡与 DDS 域，确认轮式底盘停稳、手臂处于现有开发模式、立柱已停止、运动范围清空且现场急停可用。无需另开高度读取程序，也无需把立柱手动调到 400 mm；自动归位接受 300–850 mm 的起始读数。
+2. 如需单独留存零指令证据，执行 `NETWORK=ens33 DOMAIN=0 bash run_sync_real.sh --dry-run`。正式入口自身也会重新读取反馈并完成同样的组合预检。
+3. 执行 `NETWORK=ens33 DOMAIN=0 bash run_sync_real.sh`。预检通过并回车后，程序先自动归位到 400 mm，再执行联动，默认输出到 `out/sync_real_*/`。
+
+现有联动目标为 DDS 原始读数 400–800 mm。组合几何预检默认模型偏移 105 mm，现场量尺标定后可通过 `MODEL_OFFSET_MM` 设置。探头离地高度还取决于手臂姿态与装配。左腕 pitch 已有实测限位 ±43°；手臂或立柱保护触发后会停止并向立柱发送零速，现场急停须独立可用。
+
+## 联动流畅度记录
+
+2026-11-25 的 Windows 开发版对立柱的高度误差修正加入 60 ms 低通滤波，2026-11-26 已合并到 Ubuntu 联动运行版并通过侧向 600 mm 完整仿真。
+速度前馈仍来自同一条扫描时间轴，换向时清除滤波记忆。到位、反馈与故障保护仍用原始反馈。
+用上次真机 CSV 离线试算，相邻采样的归一化命令跳变第 95 百分位从上扫 0.0247、下扫
+0.0271 降至 0.0076、0.0091。400→700→400 mm 真机联动最大跟踪误差 1.57 mm；扩展后的 400→800→400 mm 仿真最大跟踪误差 1.05 mm。新版真机已连续运行两轮：两轮均完成自动归位、正式上扫、换向、下扫并返回 400 mm；第一轮完整收纳并正常结束，第二轮在收纳阶段因 DDS 高度与速度反馈短暂达到 201 ms、刚超过 200 ms 阈值而触发保护停止。自动归位和约 1 m 单列覆盖已实现，下一步继续优化瞬时反馈超时下的连续运行稳定性。
+
+## 按需查阅
+
+[安装与环境](docs/install.md) · [控制架构](docs/architecture.md) · [硬件与站位](docs/hardware.md) · [底盘与立柱实验](docs/chassis.md) · [保护测试与现场核对](docs/testing.md)
