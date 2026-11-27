@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mujoco model="A7">
-  <compiler angle="radian" meshdir="/home/lqy/r1d_radiate_scan/models/meshes" />
+  <compiler angle="radian" meshdir="meshes" />
   <asset>
     <mesh name="pelvis_link" content_type="model/stl" file="pelvis_link.STL" />
     <mesh name="waist_yaw_link" content_type="model/stl" file="waist_yaw_link.STL" />

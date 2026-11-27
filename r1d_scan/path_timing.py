@@ -6,7 +6,7 @@
 不宣称连续时间全局最优，也没有施加 jerk 约束。
 """
 import numpy as np
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import BSpline, CubicSpline, make_lsq_spline
 from scipy.optimize import linprog
 from scipy.sparse import coo_matrix
 
@@ -197,3 +197,100 @@ class SmoothedTiming:
         local = np.where(phase > self.one_way_duration,
                          2 * self.one_way_duration - phase, phase)
         return self._m.path(np.interp(local, self._t, self._s))
+
+
+class JerkLimitedTiming:
+    """用连续的路径速度生成扫描时间轴，再按关节导数峰值留余量。
+
+    速度用非负三次 B 样条表示，其积分给出路径位置。两端速度及其
+    前两阶导数为零，所以往返、起停可直接拼接。限值用密集采样复核。
+    """
+
+    def __init__(self, positions, q, speed, joint_speed, joint_acceleration,
+                 joint_jerk, fit_knots, window_s, cycles=1):
+        if type(fit_knots) is not int or not 1 <= fit_knots <= len(q) - 6:
+            raise ValueError("关节路径的五次样条节点数不合法")
+        if not np.isfinite([joint_jerk, window_s]).all() or min(joint_jerk, window_s) <= 0:
+            raise ValueError("jerk 限值和平滑窗口必须为正数")
+        degree = 5
+        knots = np.r_[np.repeat(positions[0], degree + 1),
+                      np.linspace(positions[0], positions[-1], fit_knots + 2)[1:-1],
+                      np.repeat(positions[-1], degree + 1)]
+        self.path = make_lsq_spline(positions, q, knots, k=degree, axis=0)
+        # LP 用三次路径近似产生速度初值。最终执行五次路径，
+        # 下面用执行路径的导数重新计算时长。
+        seed = LocalPathMotion(positions, self.path(positions), speed, joint_speed,
+                               joint_acceleration, cycles)
+        dt = 0.002
+        seed_t = np.arange(0.0, seed.one_way_duration, dt)
+        seed_v = np.interp(seed_t, seed.times * seed.certification_scale,
+                           seed.path_velocity / seed.certification_scale)
+        kernel = np.hanning(max(3, int(round(window_s / dt)) | 1))
+        filtered = np.convolve(np.r_[seed_v, 0.0], kernel / kernel.sum())
+        coeff = np.pad(filtered, (3, 3))
+        time_knots = (np.arange(len(coeff) + 4) - 3) * dt
+        self._speed = BSpline(time_knots, coeff, 3, extrapolate=False)
+        self._integral = self._speed.antiderivative()
+        self._accel = self._speed.derivative(1)
+        self._jerk = self._speed.derivative(2)
+        self._base_duration = float(time_knots[len(coeff)])
+        self._offset = float(self._integral(0.0))
+        self._begin, self._end = float(positions[0]), float(positions[-1])
+        length = self._end - self._begin
+        self._distance_scale = length / (self._integral(self._base_duration) - self._offset)
+
+        times = np.linspace(0.0, self._base_duration,
+                            int(np.ceil(self._base_duration / 0.0005)) + 1)
+        peaks = [float(np.max(np.abs(self._joint_at(times, order)))) for order in (1, 2, 3)]
+        path_speed = float(np.max(self._speed(times))) * self._distance_scale
+        self.certification_scale = max(
+            1.0, path_speed / speed, peaks[0] / joint_speed,
+            (peaks[1] / joint_acceleration) ** 0.5,
+            (peaks[2] / joint_jerk) ** (1 / 3)) * 1.02
+        self.peak_path_speed = path_speed / self.certification_scale
+        self.peak_joint_speed = peaks[0] / self.certification_scale
+        self.peak_joint_acceleration = peaks[1] / self.certification_scale ** 2
+        self.peak_joint_jerk = peaks[2] / self.certification_scale ** 3
+        self.joint_speed_limit = joint_speed
+        self.joint_acceleration_limit = joint_acceleration
+        self.joint_jerk_limit = joint_jerk
+        self.one_way_duration = self._base_duration * self.certification_scale
+        self.duration = 2 * self.one_way_duration * cycles
+
+    def _joint_at(self, t, derivative):
+        s = self._begin + (self._integral(t) - self._offset) * self._distance_scale
+        s = np.clip(s, self._begin, self._end)
+        if derivative == 0:
+            return self.path(s)
+        v = (self._speed(t) * self._distance_scale)[..., None]
+        q_s = self.path(s, 1)
+        if derivative == 1:
+            return q_s * v
+        a = (self._accel(t) * self._distance_scale)[..., None]
+        q_ss = self.path(s, 2)
+        if derivative == 2:
+            return q_ss * v ** 2 + q_s * a
+        j = (self._jerk(t) * self._distance_scale)[..., None]
+        return self.path(s, 3) * v ** 3 + 3 * q_ss * v * a + q_s * j
+
+    def _local_time(self, t):
+        elapsed = np.clip(np.asarray(t, float), 0.0, self.duration)
+        phase = np.remainder(elapsed, 2 * self.one_way_duration)
+        reverse = phase > self.one_way_duration
+        local = np.where(reverse, 2 * self.one_way_duration - phase, phase)
+        return np.clip(local / self.certification_scale, 0.0, self._base_duration), reverse
+
+    def path_state(self, t):
+        """返回归一化路径进度和变化率。下行时变化率为负。"""
+        local, reverse = self._local_time(t)
+        length = self._end - self._begin
+        progress = (self._integral(local) - self._offset) * self._distance_scale / length
+        rate = self._speed(local) * self._distance_scale / (length * self.certification_scale)
+        return np.clip(progress, 0.0, 1.0), np.where(reverse, -rate, rate)
+
+    def sample(self, t, derivative=0):
+        if derivative not in (0, 1, 2, 3):
+            raise ValueError("只支持位置、速度、加速度和 jerk")
+        local, reverse = self._local_time(t)
+        value = self._joint_at(local, derivative) / self.certification_scale ** derivative
+        return value * np.where(reverse, -1.0, 1.0)[..., None] if derivative % 2 else value

@@ -1,6 +1,6 @@
 # 代码结构与数据流
 
-> 先读 [`README.md`](../README.md) 的"工作原理"三句话，再看这里的细节。
+> 联动操作入口见[模块说明](../README.md)，下文记录手臂控制回路及底盘通道的实现。
 
 ## 1. 两个进程，一条真实协议
 
@@ -118,3 +118,35 @@ scan.py 运行期采样
 | 全套 | `bash run_fault_tests.sh` | 上面全部，29 项 |
 
 `tools/fault_injection.py` 的分层设计说明见 [`testing.md`](testing.md)。
+
+## 9. 底盘：与手臂平行的第二条通道（阶段 6）
+
+到阶段 6 为止，程序里有**两条互不相干的通道**，不要把它们的生命周期混在一起：
+
+```
+   手臂（已经跑通）                              底盘（阶段 6）
+   scan.py ──rt/lowcmd (LowCmd_)──▶ sim.py        chassis_demo.py ──RPC "agv"──▶ sim.py(AgvServer)
+           ◀─rt/lowstate(LowState_)──                 请求 1001 Move / 1002 HeightAdjust
+   独占，两个写者会抢通道                          不占 lowcmd，可以和手臂并存
+```
+
+为什么必须分开：`models/r1_a7.urdf` 里没有底盘，`rt/lowcmd` 的电机槽里也没有轮子。
+底盘是另一块板子上的固件，只认服务请求。硬把轮子塞进低层槽位是行不通的。
+
+### 相关代码
+
+| 文件 | 职责 | 备注 |
+|---|---|---|
+| `r1d_scan/chassis.py` | `Chassis`：限幅、看门狗、`drive()`、`probe()` | 仿真/真机同一份 |
+| `r1d_scan/sim.py` 的 `AgvServer` | 仿真器扮演 AGV 固件（`--mobile` 才启动） | 只实现 1001/1002 |
+| `r1d_scan/sim.py` 的 `_apply_chassis/_project_base` | 运动学底盘：每步写速度、步进后投影回水平 | 不是带轮摩擦的动力学底盘 |
+| `tools/chassis_demo.py` | 动作序列演示（`forward:0.4,left:90,...`） | 每段结束一定停 |
+| `tools/test_chassis.py` | 通道测试（13 项） | 含"服务缺失不许假装成功" |
+
+### 想加新的底盘动作（例如升降柱）
+
+1. 先在 `models/chassis.json` 里把 `height.enabled` 打开，并确认 `max_vz_normalized`
+   ——**这个值是归一化的 0~1，不是 m/s**（× 76.5 mm/s 才是速度）。
+2. `chassis.py` 的 `height()` 已经限幅并走 1002。
+3. 仿真端要在 `sim.py` 的 `AgvServer.HeightAdjust` 里真的动一个 prismatic 关节；
+   现在它返回非 0 是**故意的**——"发了但没动"比"明确拒绝"更难查。

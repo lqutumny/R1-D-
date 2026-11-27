@@ -20,7 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 URDF = ROOT / "models" / "r1_a7.urdf"
 MESHES = ROOT / "models" / "meshes"
 OUT = ROOT / "models" / "r1_a7_scene.xml"
+OUT_MOBILE = ROOT / "models" / "r1_a7_scene_mobile.xml"
+OUT_LIFT = ROOT / "models" / "r1_a7_scene_lift.xml"
 MANIFEST = ROOT / "models" / "simulation.json"
+MANIFEST_MOBILE = ROOT / "models" / "simulation_mobile.json"
+MANIFEST_LIFT = ROOT / "models" / "simulation_lift.json"
 PROFILE = ROOT / "r1d_scan" / "robot_profile.json"
 
 _RAW = json.loads(PROFILE.read_text(encoding="utf-8"))
@@ -75,7 +79,60 @@ def convert(cfg):
     return scene, limits
 
 
-def add_scene(scene, cfg, limits):
+def lift_tube(body, name, half_width, length, center_z, rgba):
+    """四片筒壁保留空腔，让较窄的伸缩段嵌进去。"""
+    thickness = 0.008
+    half_wall = thickness / 2
+    center = half_width - half_wall
+    for label, x, y, dx, dy in (
+        ("front", center, 0, half_wall, half_width),
+        ("back", -center, 0, half_wall, half_width),
+        ("left", 0, center, half_width - thickness, half_wall),
+        ("right", 0, -center, half_width - thickness, half_wall),
+    ):
+        ET.SubElement(body, "geom", name=f"{name}_{label}", type="box",
+                      size=f"{dx:.4f} {dy:.4f} {length / 2:.4f}",
+                      pos=f"{x:.4f} {y:.4f} {center_z:.4f}", rgba=rgba,
+                      contype="0", conaffinity="0", mass="0")
+
+
+def add_lift_base(world, mount, base_z, lift):
+    plate_h = 0.16
+    mount_clearance = 0.026  # pelvis 网格从 robot_mount 向下 26 mm
+    low_mount, high_mount = (base_z + q for q in lift)
+    tube_h = min(0.34, low_mount - plate_h - 0.06)
+    # 最高点仍须保持相邻段的嵌套量，避免中间出现断开。
+    if 1.5 * tube_h - (high_mount - mount_clearance - plate_h) / 2 < 0.02:
+        raise ValueError("升降范围无法用当前三段立柱外形覆盖")
+
+    base = ET.SubElement(world, "body", name="lift_base", pos="0 0 0")
+    ET.SubElement(base, "geom", name="base_plate", type="box",
+                  size=f"0.30 0.22 {plate_h / 2:.4f}", pos=f"0 0 {plate_h / 2:.4f}",
+                  rgba="0.30 0.32 0.35 1", contype="0", conaffinity="0", mass="0")
+    lift_tube(base, "lift_sleeve", 0.062, tube_h, plate_h + tube_h / 2, "0.42 0.45 0.50 1")
+    column = ET.SubElement(base, "body", name="lift_column", pos="0 0 0")
+    ET.SubElement(column, "joint", name="lift_slide", type="slide", axis="0 0 1",
+                  range=f"{lift[0]:.4f} {lift[1]:.4f}", damping="8")
+    # 继承原立柱质量、质心和惯量。新外形只参与显示。
+    old_half_h = (base_z - plate_h) / 2
+    old_ixy = 2 / 3 * (0.065 ** 2 + old_half_h ** 2)
+    old_iz = 4 / 3 * 0.065 ** 2
+    ET.SubElement(column, "inertial", pos=f"0 0 {plate_h + old_half_h:.4f}", mass="2",
+                  diaginertia=f"{old_ixy:.12g} {old_ixy:.12g} {old_iz:.12g}")
+    inner_top = base_z - mount_clearance
+    ET.SubElement(column, "geom", name="lift_mast", type="box",
+                  size=f"0.034 0.034 {tube_h / 2:.4f}",
+                  pos=f"0 0 {inner_top - tube_h / 2:.4f}",
+                  rgba="0.68 0.71 0.75 1", contype="0", conaffinity="0", mass="0")
+    column.append(mount)
+
+    # 中段走内柱一半的位移。mocap 只更新外形，不增加受控自由度。
+    middle = ET.SubElement(world, "body", name="lift_middle_visual", mocap="true",
+                           pos=f"0 0 {(plate_h + inner_top) / 2:.4f}")
+    lift_tube(middle, "lift_middle", 0.046, tube_h, 0.0, "0.55 0.59 0.64 1")
+
+
+def add_scene(scene, cfg, limits, mobile=False, lift=None):
     meshdir = scene.find("compiler")
     if meshdir is None:
         meshdir = ET.SubElement(scene, "compiler")
@@ -107,7 +164,15 @@ def add_scene(scene, cfg, limits):
     for child in list(world):
         world.remove(child)
         mount.append(child)
-    world.append(mount)
+    if mobile:
+        # 底盘要能走：根 body 换成自由关节。位置由 sim.py 每步写回（运动学底盘），
+        # 姿态用投影强制水平——阶段 1 不做轮地摩擦，见 models/chassis.json 的说明。
+        mount.insert(0, ET.Element("freejoint", name="mount_free"))
+
+    if lift is not None:
+        add_lift_base(world, mount, cfg["base_z"], lift)
+    else:
+        world.append(mount)
 
     # 地面
     ET.SubElement(world, "geom", name="floor", type="plane", size="3 3 0.1",
@@ -117,14 +182,20 @@ def add_scene(scene, cfg, limits):
                   size=f"0.02 {cfg['wall_half']:.3f} {cfg['wall_half']:.3f}",
                   pos=f"{cfg['wall_x']:.4f} 0 {cfg['wall_z']:.4f}",
                   rgba="0.55 0.45 0.30 0.85", contype="0", conaffinity="0")
-    # 升降柱示意（纯视觉，不参与碰撞）：底盘板 + 立柱，从地面顶到 mount 底面
-    plate_h, mast_h = 0.16, max(0.05, cfg["base_z"] - 0.16)
-    ET.SubElement(world, "geom", name="base_plate", type="box",
-                  size=f"0.30 0.22 {plate_h/2:.4f}", pos=f"0 0 {plate_h/2:.4f}",
-                  rgba="0.30 0.32 0.35 1", contype="0", conaffinity="0")
-    ET.SubElement(world, "geom", name="lift_mast", type="box",
-                  size=f"0.07 0.07 {mast_h/2:.4f}", pos=f"0 0 {plate_h + mast_h/2:.4f}",
-                  rgba="0.42 0.45 0.50 1", contype="0", conaffinity="0")
+    if lift is None:
+        # 固定/移动底盘的示意几何（纯视觉，不参与碰撞）：底盘板 + 立柱
+        plate_h, mast_h = 0.16, max(0.05, cfg["base_z"] - 0.16)
+        # 挂在 mount 上（坐标相对 mount 原点），这样底盘一动它们跟着走
+        # mass="0"：这两块是**纯视觉**。挂进 mount 后 MuJoCo 会按体积算质量（默认密度 1000），
+        # 一不留神给整机凭空加了 58 kg，动力学就变了。底盘质量等实测后写进 models/chassis.json。
+        ET.SubElement(mount, "geom", name="base_plate", type="box",
+                      size=f"0.30 0.22 {plate_h/2:.4f}",
+                      pos=f"0 0 {plate_h/2 - cfg['base_z']:.4f}",
+                      rgba="0.30 0.32 0.35 1", contype="0", conaffinity="0", mass="0")
+        ET.SubElement(mount, "geom", name="lift_mast", type="box",
+                      size=f"0.07 0.07 {mast_h/2:.4f}",
+                      pos=f"0 0 {plate_h + mast_h/2 - cfg['base_z']:.4f}",
+                      rgba="0.42 0.45 0.50 1", contype="0", conaffinity="0", mass="0")
     ET.SubElement(world, "light", name="key", pos="1.5 -1.5 2.5", dir="-0.4 0.4 -1")
 
     # 固定机位（避免方位角猜错被箱面挡住）
@@ -225,8 +296,23 @@ def main():
     parser.add_argument("--probe-mass", type=float, default=DEFAULTS["probe_mass"])
     parser.add_argument("--wall-x", type=float, default=DEFAULTS["wall_x"])
     parser.add_argument("--wall-half", type=float, default=1.2, help="箱面板半宽/半高")
-    parser.add_argument("--out", type=Path, default=OUT)
+    parser.add_argument("--mobile", action="store_true",
+                        help="底盘可走：根 body 加自由关节，输出 r1_a7_scene_mobile.xml")
+    parser.add_argument("--lift", action="store_true",
+                        help="升降柱可伸缩：加滑动关节，输出 r1_a7_scene_lift.xml")
+    parser.add_argument("--lift-gap", type=float, nargs=2, default=(0.40, 0.90),
+                        metavar=("MIN", "MAX"),
+                        help="立柱可用间隙 m（离底盘板上表面）。默认 0.40–0.90 = "
+                             "实测 10–90 cm 的机械行程，去掉手臂会磕底盘的 0–40 cm 段")
+    parser.add_argument("--lift-mechanical-gap", type=float, nargs=2, default=(0.10, 0.90),
+                        help="立柱机械行程 m（实测值，仅记录，不进关节限位）")
+    parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
+    if args.mobile and args.lift:
+        raise SystemExit("--mobile 和 --lift 不能同时用：一个动自由关节、一个动滑动关节，先分开验证")
+    args.out = args.out or (OUT_LIFT if args.lift else (OUT_MOBILE if args.mobile else OUT))
+    manifest_path = (MANIFEST_LIFT if args.lift else
+                     (MANIFEST_MOBILE if args.mobile else MANIFEST))
     cfg = dict(DEFAULTS, base_z=args.base_z, probe_len=args.probe_len,
                probe_width=args.probe_width, probe_face_r=args.probe_face_r,
                probe_mass=args.probe_mass,
@@ -234,7 +320,16 @@ def main():
                wall_z=args.base_z + 0.15)
 
     scene, limits = convert(cfg)
-    scene = add_scene(scene, cfg, limits)
+    if args.lift:
+        plate_h = 0.16
+        nominal = float(args.base_z) - plate_h          # 场景常数：标称间隙
+        gap = tuple(float(v) for v in args.lift_gap)
+        # 关节坐标仍以标称位置为 0（这样它和扫描场景的高度对得上），
+        # 但限位由"实测间隙"反算，不再用拍脑袋的 ±0.15。
+        lift = (gap[0] - nominal, gap[1] - nominal)
+    else:
+        lift = None
+    scene = add_scene(scene, cfg, limits, mobile=args.mobile, lift=lift)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(scene).write(args.out, encoding="utf-8", xml_declaration=True)
 
@@ -277,7 +372,14 @@ def main():
         "controlled_joints": CONTROL,
         "hold_control_joints": HOLD_CONTROL,
         "held_joints_rad": HOLD,
-        "fixed": "右臂、头、相机（fixed 关节）；底盘/升降柱不建模",
+        "base_mode": ("lift" if args.lift else ("mobile" if args.mobile else "fixed")),
+        **({"lift_joint": "lift_slide",
+            "lift_range_m": list(lift),
+            "lift_gap_m": list(args.lift_gap),
+            "lift_mechanical_gap_m": list(args.lift_mechanical_gap),
+            "lift_nominal_gap_m": round(float(args.base_z) - 0.16, 4)} if lift else {}),
+        "fixed": ("右臂、头、相机（fixed 关节）；底盘为运动学模型（根 body 自由关节，sim.py 每步写回）"
+                  if args.mobile else "右臂、头、相机（fixed 关节）；底盘/升降柱不建模"),
         "probe": {"length_m": cfg["probe_len"], "width_m": cfg["probe_width"],
                   "face_diameter_m": 2 * cfg["probe_face_r"], "mass_kg": cfg["probe_mass"],
                   "com_from_flange_m": cfg["probe_com"], "axis_local": [1, 0, 0],
@@ -289,8 +391,8 @@ def main():
         "nq": model.nq, "nv": model.nv, "nu": model.nu,
         "total_mass_kg": round(float(model.body_subtreemass[0]), 3),
     }
-    MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"清单: {MANIFEST}")
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"清单: {manifest_path}")
     return 0
 
 

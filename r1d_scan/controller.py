@@ -35,6 +35,20 @@ class Limits:
     approach_accel_factor: float = 0.5
 
 
+def side_scan_limits(data):
+    limits = Limits()
+    speed = float(data.get("transfer_joint_speed_rad_s",
+                           limits.joint_speed * limits.approach_speed_factor))
+    if not 0.0 < speed <= limits.joint_speed:
+        raise ValueError("左侧扫描接近和收纳限速必须为正且不超过全局关节限速")
+    limits.approach_speed_factor = speed / limits.joint_speed
+    startup_hold = float(data.get("startup_hold_s", limits.startup_hold))
+    if not 0.5 <= startup_hold <= limits.startup_hold:
+        raise ValueError("左侧扫描启动保持时间必须在 0.5–2.0 s")
+    limits.startup_hold = startup_hold
+    return limits
+
+
 def transition(start, end, seconds, samples=200):
     """五次平滑过渡：两端位置/速度为零。"""
     u = np.linspace(0.0, 1.0, samples)
@@ -72,17 +86,22 @@ class Controller:
         self.kp, self.kd = np.asarray(kp), np.asarray(kd)
         self.effort = np.asarray(effort)
         self.start = start + self.limits.startup_hold
-        delta = float(np.max(np.abs(self.q_scan_start - self.captured)))
         # 五次过渡的峰值速度是 1.875·Δ/T，峰值加速度 5.78·Δ/T²；
         # 按限速/限加速度反算最小过渡时长，否则接近段会超速。
         approach_speed = self.limits.joint_speed * self.limits.approach_speed_factor
         approach_accel = self.limits.joint_acceleration * self.limits.approach_accel_factor
-        self.approach_seconds = max(
-            self.limits.approach_seconds,
-            1.875 * delta / approach_speed,
-            float(np.sqrt(5.78 * delta / approach_accel))) if delta > 1e-9 else 0.0
-        self.t_approach = None
-        self.q_approach = None
+        self.jerk_limit = getattr(motion, "joint_jerk_limit", None)
+        self.transfer_speed = approach_speed
+        self.transfer_accel = approach_accel
+        if self.jerk_limit is not None:
+            # 七次过渡在两端的速度、加速度与 jerk 都为零。
+            self.transfer_speed = min(approach_speed, motion.joint_speed_limit)
+            self.transfer_accel = min(approach_accel, motion.joint_acceleration_limit)
+        self.stow = self.captured.copy()
+        self.ready_seconds = 0.0
+        self.scan_started = False
+        self.set_transfers([self.captured, self.q_scan_start],
+                           [motion.sample(motion.duration), self.stow])
         self.previous = start - 0.002
         self.last_q = self.captured.copy()
         self.last_velocity = np.zeros_like(self.captured)
@@ -93,30 +112,82 @@ class Controller:
         self.finished_at = None
 
     # ---------- 轨迹 ----------
+    def _transition_progress(self, u):
+        if self.jerk_limit is not None:
+            return u**4 * (35 + u * (-84 + u * (70 - 20 * u)))
+        return u**3 * (10 + u * (-15 + 6 * u))
+
+    def _schedule(self, waypoints):
+        points = np.asarray(waypoints, float)
+        delta = np.max(np.abs(np.diff(points, axis=0)), axis=1)
+        keep = delta > 1e-9
+        points = np.r_[points[:1], points[1:][keep]]
+        delta = delta[keep]
+        speed_factor, accel_factor = (2.1875, 7.514) if self.jerk_limit else (1.875, 5.78)
+        durations = np.maximum(speed_factor * delta / self.transfer_speed,
+                               np.sqrt(accel_factor * delta / self.transfer_accel))
+        if self.jerk_limit:
+            durations = np.maximum(durations, (52.5 * delta / self.jerk_limit) ** (1 / 3))
+        if len(durations) and durations.sum() < self.limits.approach_seconds:
+            durations *= self.limits.approach_seconds / durations.sum()
+        return points, np.r_[0.0, np.cumsum(durations)]
+
+    def set_transfers(self, approach, retract, ready_seconds=0.0):
+        self.approach = self._schedule(approach)
+        self.retract = self._schedule(retract)
+        self.approach_seconds = float(self.approach[1][-1])
+        self.return_seconds = float(self.retract[1][-1])
+        self.stow = self.retract[0][-1].copy()
+        self.ready_seconds = ready_seconds
+
+    def _transfer_at(self, schedule, elapsed):
+        points, times = schedule
+        i = np.searchsorted(times, elapsed, side="right") - 1
+        u = (elapsed - times[i]) / (times[i + 1] - times[i])
+        return points[i] + np.expand_dims(self._transition_progress(u), -1) * (points[i + 1] - points[i])
+
     def target(self, now):
         elapsed = now - self.start
         if elapsed < 0:
             return "startup-hold", self.captured
         if elapsed < self.approach_seconds:
-            # 解析五次曲线：查表会在采样点之间造成速度尖峰
-            u = elapsed / self.approach_seconds if self.approach_seconds > 0 else 1.0
-            s = 10 * u**3 - 15 * u**4 + 6 * u**5
-            return "approach", self.captured + s * (self.q_scan_start - self.captured)
-        scan_elapsed = elapsed - self.approach_seconds
+            return "approach", self._transfer_at(self.approach, elapsed)
+        scan_elapsed = elapsed - self.approach_seconds - self.ready_seconds
+        if scan_elapsed < 0:
+            return "scan-ready", self.q_scan_start
         if scan_elapsed < self.motion.duration:
             # 多趟时按"每一趟内的位置"判方向，否则第二趟起会一直被标成 scan-down
             cycle_pos = scan_elapsed % (2 * self.motion.one_way_duration)
             direction = "scan-up" if cycle_pos < self.motion.one_way_duration else "scan-down"
             return direction, self.motion.sample(scan_elapsed)
-        # 往返结束后回到捕获姿态，让整轮动作回到起点
         back_elapsed = scan_elapsed - self.motion.duration
-        scan_end = self.motion.sample(self.motion.duration)
-        if back_elapsed < self.approach_seconds:
-            u = back_elapsed / self.approach_seconds if self.approach_seconds > 0 else 1.0
-            s = 10 * u**3 - 15 * u**4 + 6 * u**5
-            return "return", scan_end + s * (self.captured - scan_end)
+        if back_elapsed < self.return_seconds:
+            return "return", self._transfer_at(self.retract, back_elapsed)
         self.complete = True
-        return "finished-hold", self.captured
+        return "finished-hold", self.stow
+
+    def preflight_targets(self, times):
+        """批量采样，保留运行时使用的时间边界与过渡曲线。"""
+        elapsed = times - self.start
+        scan_elapsed = elapsed - self.approach_seconds - self.ready_seconds
+        back_elapsed = scan_elapsed - self.motion.duration
+        startup = elapsed < 0
+        approach = (elapsed >= 0) & (elapsed < self.approach_seconds)
+        ready = ~(startup | approach) & (scan_elapsed < 0)
+        scan = (scan_elapsed >= 0) & (back_elapsed < 0)
+        retract = (back_elapsed >= 0) & (back_elapsed < self.return_seconds)
+        finished = ~(startup | approach | ready | scan | retract)
+        q = np.empty((len(times), len(self.captured)))
+        phases = np.empty(len(times), dtype=object)
+        q[startup], phases[startup] = self.captured, "startup-hold"
+        q[approach], phases[approach] = self._transfer_at(self.approach, elapsed[approach]), "approach"
+        q[ready], phases[ready] = self.q_scan_start, "scan-ready"
+        q[scan] = self.motion.sample(scan_elapsed[scan])
+        cycle = scan_elapsed[scan] % (2 * self.motion.one_way_duration)
+        phases[scan] = np.where(cycle < self.motion.one_way_duration, "scan-up", "scan-down")
+        q[retract], phases[retract] = self._transfer_at(self.retract, back_elapsed[retract]), "return"
+        q[finished], phases[finished] = self.stow, "finished-hold"
+        return phases, q
 
     # ---------- 重力前馈 ----------
     def gravity(self, q):
@@ -198,23 +269,35 @@ class Controller:
         feedforward = self.gravity(q_target)
         self.last_ff = feedforward
         torque = self.check(q_target, state, now, dt, feedforward)
+        if self.ready_seconds and self.phase == "scan-up" and not self.scan_started:
+            if (np.max(np.abs(state.q - self.q_scan_start)) > 0.12
+                    or np.max(np.abs(state.dq)) > 0.10):
+                raise ControlFault("未在扫描下端点附近稳定，未开始扫动")
+            self.scan_started = True
         self.last_q = q_target.copy()
         self.previous = now
         return self.phase, q_target, float(np.max(np.abs(torque + feedforward)))
 
 
-def load_motion(path=PROFILE, passes=1):
-    from path_timing import LocalPathMotion, SmoothedTiming
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+def build_motion(data, passes=1, smooth_legacy=True):
+    from path_timing import JerkLimitedTiming, LocalPathMotion, SmoothedTiming
+
     q = np.array(data["q_rad"], float)
     distance = np.linspace(0.0, data["length_m"], len(q))
-    motion = LocalPathMotion(distance, q, data["requested_peak_speed_m_s"],
-                             data["joint_speed_limit_rad_s"],
-                             data["joint_acceleration_limit_rad_s2"], cycles=passes)
-    # 时间最优解是 bang-bang 的，加速度硬切换 → 真机上顿挫。
-    # 这里只重排时间轴（路径不变），默认 0.15 s 滑动平均；profile 里可覆盖或设 0 关闭。
+    speed = data["requested_peak_speed_m_s"]
+    joint_speed = data["joint_speed_limit_rad_s"]
+    accel = data["joint_acceleration_limit_rad_s2"]
     window = float(data.get("time_smooth_s", 0.15))
-    if window > 0:
-        motion = SmoothedTiming(motion, window,
-                                 accel_limit=data["joint_acceleration_limit_rad_s2"])
-    return data, motion
+    if "fit_interior_knots" in data or "joint_jerk_limit_rad_s3" in data:
+        return JerkLimitedTiming(distance, q, speed, joint_speed, accel,
+                                 data["joint_jerk_limit_rad_s3"], data["fit_interior_knots"],
+                                 window, passes)
+    motion = LocalPathMotion(distance, q, speed, joint_speed, accel, cycles=passes)
+    if smooth_legacy and window > 0:
+        return SmoothedTiming(motion, window, accel_limit=accel)
+    return motion
+
+
+def load_motion(path=PROFILE, passes=1):
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return data, build_motion(data, passes)
