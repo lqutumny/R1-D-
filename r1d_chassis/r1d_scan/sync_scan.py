@@ -1,5 +1,6 @@
 """用同一条时间轴同步运行左臂与升降柱。"""
 import argparse
+from collections import deque
 from contextlib import ExitStack
 import csv
 import json
@@ -7,7 +8,7 @@ from math import expm1
 from pathlib import Path
 import signal
 import sys
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 import time
 
 import mujoco
@@ -21,7 +22,7 @@ from kinematics import ArmKinematics
 from lift_dds import (
     ALARM_TOPIC, CMD_TOPIC, HEIGHT_TOPIC, VELOCITY_TOPIC, COMMAND_CAP,
     MAX_SPEED_M_S, SIM_ZERO_GAP_M,
-    Error_, Point32_, Twist_, raw_height_mm, vertical_twist,
+    Error_, Point32_, Twist_, motion_twist, raw_height_mm, vertical_twist,
 )
 import preflight
 from profile import load as load_profile
@@ -45,12 +46,17 @@ ENTRY_TOL_M = 0.010
 ENDPOINT_TOL_M = 0.005
 TRACKING_TOL_M = 0.020
 ENDPOINT_SPEED_M_S = 0.005
+FEEDBACK_TOPICS = (
+    (HEIGHT_TOPIC, "height", "高度"),
+    (VELOCITY_TOPIC, "velocity", "速度"),
+    (ALARM_TOPIC, "alarm", "告警"),
+)
 
 
-def lift_target(motion, elapsed):
+def lift_target(motion, elapsed, low_m=LOW_M, high_m=HIGH_M):
     progress, rate = motion.path_state(elapsed)
-    travel = HIGH_M - LOW_M
-    return LOW_M + travel * float(progress), travel * float(rate)
+    travel = high_m - low_m
+    return low_m + travel * float(progress), travel * float(rate)
 
 
 class LiftChannel:
@@ -60,10 +66,29 @@ class LiftChannel:
         self.height = None
         self.alarm = None
         self.velocity = None
+        self.chassis_velocity = None
         self.target = None
         self.fault = None
         self.normalized_command = 0.0
+        # 单轮程序保持既有 0.5；连续入口可在自己的集中配置中显式调节。
+        self.command_cap = COMMAND_CAP
+        self.command_period = PERIOD
+        self.base_command = 0.0
+        self.allow_base_motion = False
+        self.command_writes = 0
         self.stop = Event()
+        self.diagnostic_started = time.monotonic()
+        self.control_phase = "initialization"
+        self.target_height_m = None
+        self._diagnostic_lock = Lock()
+        self._health = {
+            topic: {"frames": 0, "last_received": None,
+                    "intervals_s": deque(maxlen=50000),
+                    "max_data_age_s": 0.0}
+            for topic, _key, _label in FEEDBACK_TOPICS
+        }
+        self.stale_events = []
+        self._active_stale = set()
         for topic, kind, callback in (
             (HEIGHT_TOPIC, Point32_, self.on_height),
             (ALARM_TOPIC, Error_, self.on_alarm),
@@ -72,40 +97,138 @@ class LiftChannel:
             reader = ChannelSubscriber(topic, kind)
             reader.Init(callback, 1)
             resources.callback(reader.Close)
+
+    def _observe(self, topic, now):
+        with self._diagnostic_lock:
+            health = self._health[topic]
+            if health["last_received"] is not None:
+                health["intervals_s"].append(now - health["last_received"])
+            health["last_received"] = now
+            health["frames"] += 1
+
+    def set_context(self, phase=None, target_height_m=None):
+        with self._diagnostic_lock:
+            if phase is not None:
+                self.control_phase = phase
+            if target_height_m is not None:
+                self.target_height_m = float(target_height_m)
+
     def on_height(self, message):
+        now = time.monotonic()
+        self._observe(HEIGHT_TOPIC, now)
         try:
-            self.height = (time.monotonic(), raw_height_mm(message) / 1000.0)
+            self.height = (now, raw_height_mm(message) / 1000.0)
         except ValueError as exc:
             self.fault = str(exc)
 
     def on_alarm(self, message):
-        self.alarm = (time.monotonic(), int(message.state))
+        now = time.monotonic()
+        self._observe(ALARM_TOPIC, now)
+        self.alarm = (now, int(message.state))
         if message.state:
             self.fault = f"立柱告警 source={message.source} state={message.state}"
 
     def on_velocity(self, message):
+        now = time.monotonic()
+        self._observe(VELOCITY_TOPIC, now)
         x, y, z, yaw = (float(message.linear.x), float(message.linear.y),
                         float(message.linear.z), float(message.angular.z))
         if not np.isfinite([x, y, z, yaw]).all():
             self.fault = "底盘速度反馈含非有限值"
-        elif max(abs(x), abs(y), abs(yaw)) > 0.03:
-            self.fault = "检测到轮式底盘移动"
-        self.velocity = (time.monotonic(), z * MAX_SPEED_M_S)
+        else:
+            with self._diagnostic_lock:
+                phase = self.control_phase
+            allowed = self.allow_base_motion and phase in ("column-shift", "base-stop")
+            if allowed:
+                if max(abs(y), abs(yaw)) > 0.10:
+                    self.fault = "换列阶段底盘侧向或旋转反馈超过 0.10"
+            elif max(abs(x), abs(y), abs(yaw)) > 0.03:
+                self.fault = f"非换列阶段检测到底盘移动（阶段 {phase}）"
+        self.chassis_velocity = (now, x, y, yaw)
+        self.velocity = (now, z * MAX_SPEED_M_S)
+
+    @staticmethod
+    def _round_ms(value):
+        return round(1000.0 * float(value), 3)
+
+    def feedback_health(self):
+        now = time.monotonic()
+        result = {"timeout_ms": self._round_ms(FEEDBACK_TIMEOUT), "topics": {}}
+        with self._diagnostic_lock:
+            for topic, _key, _label in FEEDBACK_TOPICS:
+                health = self._health[topic]
+                intervals = np.asarray(health["intervals_s"], dtype=float)
+                if intervals.size:
+                    percentiles = np.percentile(intervals, [50, 95, 99])
+                    interval_ms = {
+                        "p50": self._round_ms(percentiles[0]),
+                        "p95": self._round_ms(percentiles[1]),
+                        "p99": self._round_ms(percentiles[2]),
+                        "max": self._round_ms(intervals.max()),
+                    }
+                else:
+                    interval_ms = {"p50": None, "p95": None, "p99": None, "max": None}
+                last = health["last_received"]
+                result["topics"][topic] = {
+                    "frame_count": int(health["frames"]),
+                    "interval_sample_count": int(intervals.size),
+                    "interval_window_capacity": 50000,
+                    "interval_ms": interval_ms,
+                    "max_data_age_ms": self._round_ms(health["max_data_age_s"]),
+                    "last_data_age_ms": None if last is None else self._round_ms(now - last),
+                }
+        return result
+
+    def _record_stale(self, now, stale):
+        height = None if self.height is None else self.height[1]
+        velocity = None if self.velocity is None else self.velocity[1]
+        with self._diagnostic_lock:
+            phase = self.control_phase
+            target = self.target_height_m
+            for topic, age in stale:
+                if topic in self._active_stale:
+                    continue
+                self._active_stale.add(topic)
+                self.stale_events.append({
+                    "topic": topic,
+                    "control_phase": phase,
+                    "t_s": round(now - self.diagnostic_started, 6),
+                    "data_age_ms": None if age is None else self._round_ms(age),
+                    "target_height_mm": None if target is None else round(1000.0 * target, 3),
+                    "actual_height_mm": None if height is None else round(1000.0 * height, 3),
+                    "velocity_m_s": None if velocity is None else round(float(velocity), 6),
+                    "normalized_command": round(float(self.normalized_command), 6),
+                })
 
     def feedback(self, now, timeout=FEEDBACK_TIMEOUT):
         if self.fault:
             raise ControlFault(self.fault)
-        readings = (("高度", self.height), ("告警", self.alarm), ("速度", self.velocity))
+        readings = ((HEIGHT_TOPIC, "高度", self.height),
+                    (VELOCITY_TOPIC, "速度", self.velocity),
+                    (ALARM_TOPIC, "告警", self.alarm))
         stale = []
-        for name, item in readings:
+        healthy = set()
+        for topic, _name, item in readings:
             if item is None:
-                stale.append(f"{name}=未收到")
-            elif now - item[0] > timeout:
-                stale.append(f"{name}={1000 * (now - item[0]):.0f} ms")
+                stale.append((topic, None))
+                continue
+            age = max(0.0, now - item[0])
+            with self._diagnostic_lock:
+                self._health[topic]["max_data_age_s"] = max(
+                    self._health[topic]["max_data_age_s"], age)
+            if age > timeout:
+                stale.append((topic, age))
+            else:
+                healthy.add(topic)
+        with self._diagnostic_lock:
+            self._active_stale.difference_update(healthy)
         if stale:
-            raise ControlFault(f"升降反馈缺失或超时（阈值 {1000 * timeout:.0f} ms："
-                               + "，".join(stale) + "）")
-        height, velocity = readings[0][1][1], readings[2][1][1]
+            self._record_stale(now, stale)
+            details = [f"{topic}=未收到" if age is None
+                       else f"{topic}={1000 * age:.0f} ms" for topic, age in stale]
+            raise ControlFault(f"升降反馈缺失或超时（阈值 {1000 * timeout:.0f} ms；"
+                               "过期话题：" + "，".join(details) + "）")
+        height, velocity = readings[0][2][1], readings[1][2][1]
         if not -0.020 <= height <= 0.860:
             raise ControlFault(f"立柱读数 {height * 1000:.1f} mm 超出反馈可信范围")
         return height, velocity
@@ -148,28 +271,34 @@ class LiftChannel:
                     if direction:
                         normalized = (speed + correction) / MAX_SPEED_M_S
                         # 到达误差容差以内时允许等待追上目标，避免换向前反向补偿。
-                        command = direction * float(np.clip(direction * normalized, 0.0, COMMAND_CAP))
-                if not self.publisher.Write(vertical_twist(command)):
-                    raise ControlFault("升降速度发送失败")
+                        command = direction * float(np.clip(
+                            direction * normalized, 0.0, self.command_cap))
+                forward = float(self.base_command)
+                if not np.isfinite(forward) or abs(forward) > 1.0:
+                    raise ControlFault("底盘前进命令不是 [-1,1] 内的有限值")
+                if not self.publisher.Write(motion_twist(forward, command)):
+                    raise ControlFault("底盘与升降共享 Twist 发送失败")
+                self.command_writes += 1
                 self.normalized_command = command
                 last_direction = direction
                 last_tick = now
-                self.stop.wait(PERIOD)
+                self.stop.wait(self.command_period)
         except Exception as exc:
             self.fault = str(exc)
         finally:
             sent_zero = False
             for attempt in range(3):
                 try:
-                    sent_zero = self.publisher.Write(vertical_twist(0.0)) or sent_zero
+                    sent_zero = self.publisher.Write(motion_twist(0.0, 0.0)) or sent_zero
                 except Exception:
                     pass
                 if attempt < 2:
-                    time.sleep(PERIOD)
+                    time.sleep(self.command_period)
             if not sent_zero:
                 reason = "停止升降的零速指令发送失败"
                 self.fault = f"{self.fault}；{reason}" if self.fault else reason
             self.normalized_command = 0.0
+            self.base_command = 0.0
 
 
 class SyncRunner(Runner):
@@ -182,7 +311,6 @@ class SyncRunner(Runner):
         self.sample_at = 0.0
 
     def step(self, state, now):
-        height, speed = self.lift.feedback(now)
         c = self.controller
         elapsed = now - c.start - c.approach_seconds - c.ready_seconds
         target, velocity = lift_target(c.motion, elapsed)
@@ -195,6 +323,8 @@ class SyncRunner(Runner):
             phase = "scan-down"
         else:
             phase = "after-scan"
+        self.lift.set_context(phase, target)
+        height, speed = self.lift.feedback(now)
         if phase != self.lift_phase:
             endpoint = HIGH_M if phase == "scan-down" else LOW_M
             tolerance = ENDPOINT_TOL_M if phase in ("scan-down", "after-scan") else ENTRY_TOL_M
@@ -223,7 +353,7 @@ class SyncRunner(Runner):
 
 
 class Geometry:
-    def __init__(self, held, reference_offset_m):
+    def __init__(self, held, reference_offset_m, ignored_base_pairs=()):
         self.kin = ArmKinematics(SCENE_SIDE_SYNC)
         self.model, self.data = self.kin.model, self.kin.data
         slide = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "lift_slide")
@@ -231,6 +361,7 @@ class Geometry:
         manifest = json.loads((ROOT / "models" / "simulation_lift.json").read_text())
         self.nominal = float(manifest["lift_nominal_gap_m"])
         self.reference_offset_m = reference_offset_m
+        self.ignored_base_pairs = {tuple(pair) for pair in ignored_base_pairs}
         self.wall_axis = 1
         wall = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "wall")
         if wall < 0:
@@ -267,12 +398,22 @@ class Geometry:
         mujoco.mj_fwdPosition(self.model, self.data)
 
         def minimum(geoms):
-            return min(mujoco.mj_geomDistance(self.model, self.data, base, arm, 2.0, None)
-                       for base in geoms for arm in self.arm_geoms)
+            distances = []
+            for base in geoms:
+                base_name = mujoco.mj_id2name(
+                    self.model, mujoco.mjtObj.mjOBJ_GEOM, base) or ""
+                for arm in self.arm_geoms:
+                    arm_name = mujoco.mj_id2name(
+                        self.model, mujoco.mjtObj.mjOBJ_GEOM, arm) or ""
+                    if (arm_name, base_name) in self.ignored_base_pairs:
+                        continue
+                    distances.append(mujoco.mj_geomDistance(
+                        self.model, self.data, base, arm, 2.0, None))
+            return min(distances)
         return minimum([self.plate]), minimum(self.tube_geoms)
 
 
-def planned_geometry(controller, profile, geometry, space):
+def planned_geometry(controller, profile, geometry, space, low_m=LOW_M, high_m=HIGH_M):
     c = controller
     motion = c.motion
     scan_start = c.start + c.approach_seconds + c.ready_seconds
@@ -282,7 +423,7 @@ def planned_geometry(controller, profile, geometry, space):
     points, plate, tube, scan_z = [], [], [], []
     for t in times:
         phase, q = c.target(t)
-        height, _ = lift_target(motion, t - scan_start)
+        height, _ = lift_target(motion, t - scan_start, low_m, high_m)
         point = geometry.position(q, height)
         issue = space.issue(q)
         if issue:
@@ -303,11 +444,11 @@ def planned_geometry(controller, profile, geometry, space):
     return result
 
 
-def planned_lift_entry(q, start_height, geometry, space):
-    """手臂保持当前姿态时，检查当前立柱高度到 400 mm 的整段组合几何。"""
-    count = max(2, int(np.ceil(abs(start_height - LOW_M) / .01)) + 1)
+def planned_lift_entry(q, start_height, geometry, space, low_m=LOW_M):
+    """手臂保持当前姿态时，检查当前立柱高度到目标低位的整段组合几何。"""
+    count = max(2, int(np.ceil(abs(start_height - low_m) / .01)) + 1)
     plate, tube = [], []
-    for height in np.linspace(start_height, LOW_M, count):
+    for height in np.linspace(start_height, low_m, count):
         geometry.set_height(float(height))
         issue = space.issue(q)
         if issue:
@@ -317,22 +458,24 @@ def planned_lift_entry(q, start_height, geometry, space):
             raise ControlFault(f"立柱自动归位在 {height * 1000:.1f} mm 存在组合碰撞")
         plate.append(plate_gap)
         tube.append(tube_gap)
-    geometry.set_height(LOW_M)
+    geometry.set_height(low_m)
     return {
         "start_height_mm": round(start_height * 1000, 3),
-        "target_height_mm": round(LOW_M * 1000, 3),
-        "travel_mm": round(abs(start_height - LOW_M) * 1000, 3),
+        "target_height_mm": round(low_m * 1000, 3),
+        "travel_mm": round(abs(start_height - low_m) * 1000, 3),
         "min_arm_to_base_plate_m": float(min(plate)),
         "min_arm_to_lift_tube_m": float(min(tube)),
     }
 
 
-def position_lift_at_low(controller, codec, arm_publisher, lift, state_getter):
-    """保持双臂当前姿态，把立柱闭环移到 400 mm 并确认停稳。"""
+def position_lift_at_low(controller, codec, arm_publisher, lift, state_getter, low_m=LOW_M,
+                         stop_event=None):
+    """保持双臂当前姿态，把立柱闭环移到目标低位并确认停稳。"""
     target_q = controller.captured.copy()
     started = time.monotonic()
+    lift.set_context("lift-entry", low_m)
     start_height, _ = lift.feedback(started)
-    timeout = max(8.0, abs(start_height - LOW_M)
+    timeout = max(8.0, abs(start_height - low_m)
                   / max(MAX_SPEED_M_S * AUTO_ENTRY_COMMAND_CAP, 1e-6) * 1.8 + 5.0)
     deadline = started + timeout
     stable_since = None
@@ -342,6 +485,8 @@ def position_lift_at_low(controller, codec, arm_publisher, lift, state_getter):
     peak_command = 0.0
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                raise ControlFault("操作者中止立柱自动归位")
             now = time.monotonic()
             dt = now - previous
             if dt <= 0 or dt > controller.limits.loop_stall_stop:
@@ -358,8 +503,9 @@ def position_lift_at_low(controller, codec, arm_publisher, lift, state_getter):
             controller.previous = now
             previous = now
 
+            lift.set_context("lift-entry", low_m)
             height, speed = lift.feedback(now)
-            error = LOW_M - height
+            error = low_m - height
             if now >= next_lift_write:
                 next_lift_write = now + PERIOD
                 normalized = float(np.clip(4.0 * error / MAX_SPEED_M_S,
@@ -389,7 +535,7 @@ def position_lift_at_low(controller, codec, arm_publisher, lift, state_getter):
                 stable_since = None
             if now >= deadline:
                 raise ControlFault(f"立柱自动归位超时：当前 {height * 1000:.1f} mm，"
-                                   f"目标 {LOW_M * 1000:.0f} mm")
+                                   f"目标 {low_m * 1000:.0f} mm")
             time.sleep(.005)
     finally:
         sent_zero = False
@@ -424,7 +570,9 @@ def save_report(directory, runner, geometry, profile, planned, fault, network, d
               "approach_segments": len(runner.controller.approach[0]) - 1,
               "planned": planned, "lift_endpoints": runner.endpoints, "arm_phases": runner.phase_history,
               "arm_commands": runner.writes, "arm_max_tracking_deg": float(np.degrees(runner.max_error)),
-              "arm_loop_max_ms": runner.dt_max * 1000}
+              "arm_loop_max_ms": runner.dt_max * 1000,
+              "feedback_health": runner.lift.feedback_health(),
+              "stale_events": list(runner.lift.stale_events)}
     if samples:
         result["last_measured_arm_deg"] = np.degrees(samples[-1][-1]).round(2).tolist()
     if scan:
@@ -460,7 +608,8 @@ def save_report(directory, runner, geometry, profile, planned, fault, network, d
     print(payload, flush=True)
 
 
-def verify_start(state, initial, lift, limits, require_low=False, pose_tolerance_deg=1.0):
+def verify_start(state, initial, lift, limits, require_low=False, pose_tolerance_deg=1.0,
+                 low_m=LOW_M):
     now = time.monotonic()
     if state is None or now - state.received > limits.state_timeout:
         raise ControlFault("手臂反馈缺失或超时")
@@ -474,14 +623,15 @@ def verify_start(state, initial, lift, limits, require_low=False, pose_tolerance
         raise ControlFault("手臂未停稳或预检姿态已变化")
     if not np.isfinite(state.hold_q).all() or np.any(np.abs(state.hold_q) > np.pi):
         raise ControlFault("保持关节反馈异常")
+    lift.set_context("preflight", low_m if require_low else None)
     height, speed = lift.feedback(now)
     if not AUTO_ENTRY_MIN_M <= height <= AUTO_ENTRY_MAX_M:
         raise ControlFault(f"立柱自动归位只接受 {AUTO_ENTRY_MIN_M * 1000:.0f}–"
                            f"{AUTO_ENTRY_MAX_M * 1000:.0f} mm 的起始高度，"
                            f"当前 {height * 1000:.1f} mm")
-    if require_low and (abs(height - LOW_M) > AUTO_ENTRY_TOL_M
+    if require_low and (abs(height - low_m) > AUTO_ENTRY_TOL_M
                         or abs(speed) > ENDPOINT_SPEED_M_S):
-        raise ControlFault(f"立柱自动归位未停在 {LOW_M * 1000:.0f} mm："
+        raise ControlFault(f"立柱自动归位未停在 {low_m * 1000:.0f} mm："
                            f"当前 {height * 1000:.1f} mm，速度 {speed:.4f} m/s")
     return height, speed
 
@@ -494,7 +644,8 @@ def write_preflight(directory, args, planned=None, fault=None):
 
 
 def prepare(initial, initial_height, raw, arm, codec, profile, motion, limits, offset_m,
-            fast_preflight=False):
+            fast_preflight=False, low_m=LOW_M, high_m=HIGH_M,
+            ignored_base_pairs=()):
     lo, hi, effort = [np.array([j[key] for j in raw["joints"]])
                       for key in ("lower", "upper", "effort")]
     held = {k: v for k, v in raw["held"].items() if k != "note"}
@@ -503,16 +654,17 @@ def prepare(initial, initial_height, raw, arm, codec, profile, motion, limits, o
     controller = Controller(initial.q, motion, lo, hi, codec.kp, codec.kd, effort,
                             limits=limits, expected_mode_machine=initial.mode_machine,
                             scene=SCENE_SIDE_SYNC)
-    geometry = Geometry(held, offset_m)
+    geometry = Geometry(held, offset_m, ignored_base_pairs=ignored_base_pairs)
     wall_axis = int(profile.get("wall_axis", 1))
     expected_wall = profile["y_m"] + profile["standoff_m"]
     if wall_axis != geometry.wall_axis or not np.isclose(geometry.wall_pos, expected_wall, atol=1e-6):
         raise ControlFault("侧向升降模型与 600 mm 轨迹的箱面位置不一致")
     space = Clearance(geometry.kin, lo + limits.margin, hi - limits.margin,
-                      geometry.wall_pos, held, wall_axis=wall_axis)
+                      geometry.wall_pos, held, wall_axis=wall_axis,
+                      ignored_pairs=ignored_base_pairs)
     space.base = [geometry.plate, *geometry.tube_geoms]
-    lift_entry = planned_lift_entry(initial.q, initial_height, geometry, space)
-    geometry.set_height(LOW_M)
+    lift_entry = planned_lift_entry(initial.q, initial_height, geometry, space, low_m)
+    geometry.set_height(low_m)
     stow = np.radians([raw["stow_deg"][name] for name in arm.names()])
     typical = np.array([raw["initial"].get(name, 0.0) for name in arm.names()])
     approach = plan(space, initial.q, controller.q_scan_start, "接近扫描线",
@@ -526,9 +678,10 @@ def prepare(initial, initial_height, raw, arm, codec, profile, motion, limits, o
                           clearance=space, **preflight_kwargs)
     if not check.ok:
         raise ControlFault(f"手臂预检失败: {check.violations[:5]}")
-    planned = planned_geometry(controller, profile, geometry, space)
+    planned = planned_geometry(controller, profile, geometry, space, low_m, high_m)
     planned.update(model_reference_offset_m=offset_m,
-                   target_height_mm=[LOW_M * 1000, HIGH_M * 1000],
+                   ignored_model_collision_pairs=[list(pair) for pair in ignored_base_pairs],
+                   target_height_mm=[low_m * 1000, high_m * 1000],
                    lift_entry=lift_entry,
                    arm_approach_waypoints_deg=np.degrees(approach).round(2).tolist(),
                    arm_stow_waypoints_deg=np.degrees(retract).round(2).tolist(),

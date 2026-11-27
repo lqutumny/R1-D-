@@ -1,0 +1,19 @@
+{
+  "low_height_mm": 330.0,
+  "high_height_mm": 830.0,
+  "entry_tolerance_mm": 2.0,
+  "endpoint_tolerance_mm": 5.0,
+  "endpoint_speed_m_s": 0.005,
+  "tracking_tolerance_mm": 20.0,
+  "lift_command_cap": 0.65,
+  "conservative_time_scale": 1.5,
+  "arm_endpoint_tolerance_deg": 7.0,
+  "endpoint_settle_timeout_s": 3.0,
+  "startup_hold_s": 0.75,
+  "final_hold_s": 0.5,
+  "final_settle_timeout_s": 3.0,
+  "csv_sample_period_s": 0.02,
+  "csv_flush_period_s": 1.0,
+  "recent_cycle_limit": 10,
+  "stale_event_limit": 1000
+}

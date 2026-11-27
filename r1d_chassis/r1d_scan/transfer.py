@@ -8,7 +8,7 @@ from transport import ControlFault
 
 
 class Clearance:
-    def __init__(self, kin, lo, hi, wall_x, held, wall_axis=0):
+    def __init__(self, kin, lo, hi, wall_x, held, wall_axis=0, ignored_pairs=()):
         self.kin = kin
         self.model, self.data = kin.model, kin.data
         self.lo, self.hi = lo, hi
@@ -16,6 +16,7 @@ class Clearance:
         self.left = set()
         self.base = []
         self.meshes = {}
+        self.ignored_pairs = {tuple(pair) for pair in ignored_pairs}
         for i, body in enumerate(self.model.geom_bodyid):
             body_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body) or ""
             name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, i)
@@ -28,7 +29,11 @@ class Clearance:
                     start = self.model.mesh_vertadr[mesh]
                     self.meshes[i] = self.model.mesh_vert[start:start + self.model.mesh_vertnum[mesh]]
         # 分离的包围球不可能接触，剩余配对仍按 MuJoCo 的精确距离判断。
-        pairs = [(i, base) for i in self.left for base in self.base]
+        def name(geom):
+            return mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom) or ""
+
+        pairs = [(i, base) for i in self.left for base in self.base
+                 if (name(i), name(base)) not in self.ignored_pairs]
         self.pair_left, self.pair_base = np.asarray(pairs, dtype=np.intp).reshape(-1, 2).T
         radii = self.model.geom_rbound.copy()
         for i, vertices in self.meshes.items():

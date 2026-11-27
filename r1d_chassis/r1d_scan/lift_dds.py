@@ -18,9 +18,14 @@ MAX_SPEED_M_S = 0.0765
 COMMAND_CAP = 0.5
 
 
-def vertical_twist(normalized):
-    return Twist_(Vector3_(0.0, 0.0, float(normalized)),
+def motion_twist(forward, vertical):
+    """构造底盘前进与立柱共用话题的完整 Twist；侧移和旋转始终为零。"""
+    return Twist_(Vector3_(float(forward), 0.0, float(vertical)),
                   Vector3_(0.0, 0.0, 0.0))
+
+
+def vertical_twist(normalized):
+    return motion_twist(0.0, normalized)
 
 
 def encode_height(gap_m):

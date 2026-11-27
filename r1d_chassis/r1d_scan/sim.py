@@ -398,6 +398,60 @@ class PhysicsBridge:
                     if self.lift else {"base_mode": "fixed"}))}
 
 
+class FeedbackDrop:
+    """按联动控制阶段暂停指定升降反馈话题，仅用于本机回环诊断。"""
+
+    def __init__(self, topics, phase, duration_ms, started):
+        self.topics = tuple(topics or ())
+        self.phase = phase
+        self.duration_s = float(duration_ms) / 1000.0
+        self.started = started
+        self.drop_started = None
+        self.drop_ended = None
+        self.phase_match_started = None
+        # 立柱在下扫末端约提前 0.38 s 进入近零速；等待 0.5 s，确保控制器
+        # 已从 scan-down 切到 after-scan（手臂收纳），避免把末端减速误标为收纳。
+        self.trigger_delay_s = 0.500 if phase == "after-scan" else 0.0
+        self.dropped_frames = {name: 0 for name in self.topics}
+
+    def skip(self, topic, now, phase, armed):
+        if not self.topics:
+            return False
+        if self.drop_started is None:
+            if not armed or phase != self.phase:
+                self.phase_match_started = None
+            else:
+                self.phase_match_started = self.phase_match_started or now
+                if now - self.phase_match_started >= self.trigger_delay_s:
+                    self.drop_started = now
+                    self.drop_ended = now + self.duration_s
+                    print("FEEDBACK_DROP_START "
+                          f"topics={','.join(self.topics)} phase={phase} "
+                          f"duration_ms={self.duration_s * 1000:.1f} "
+                          f"t={now - self.started:.6f}", flush=True)
+        active = (self.drop_started is not None and now < self.drop_ended)
+        if active and topic in self.topics:
+            self.dropped_frames[topic] += 1
+            return True
+        return False
+
+    def report(self, now):
+        actual_ms = None
+        if self.drop_started is not None:
+            actual_ms = 1000.0 * (min(now, self.drop_ended) - self.drop_started)
+        return {
+            "requested_topics": list(self.topics),
+            "control_phase": self.phase,
+            "requested_duration_ms": round(self.duration_s * 1000.0, 3),
+            "trigger_delay_ms": round(self.trigger_delay_s * 1000.0, 3),
+            "triggered": self.drop_started is not None,
+            "start_t_s": (None if self.drop_started is None
+                          else round(self.drop_started - self.started, 6)),
+            "actual_duration_ms": None if actual_ms is None else round(actual_ms, 3),
+            "dropped_frames": dict(self.dropped_frames),
+        }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--network", default="lo")
@@ -418,11 +472,29 @@ def main():
                         help="联动仿真：只允许 lo，使用 R1-A7-D 升降 DDS 话题")
     parser.add_argument("--initial-lift-height-mm", type=float,
                         help="仅联动仿真：覆盖初始 DDS 高度，用于验证自动归位")
+    parser.add_argument("--drop-feedback-topics", nargs="+",
+                        choices=("height", "velocity", "alarm"),
+                        help="仅联动回环：暂停一个或多个升降反馈话题")
+    parser.add_argument("--drop-feedback-phase",
+                        choices=("lift-entry", "before-scan", "scan-up", "scan-down",
+                                 "after-scan"),
+                        help="仅联动回环：开始暂停反馈的控制阶段")
+    parser.add_argument("--drop-feedback-duration-ms", type=float, default=0.0,
+                        help="仅联动回环：暂停反馈的持续时间（ms）")
     args = parser.parse_args()
     if args.sync_lift:
         if args.network != "lo" or args.mobile:
             parser.error("--sync-lift 仅支持 lo 上的固定轮式底盘")
         args.lift = True
+    drop_requested = bool(args.drop_feedback_topics or args.drop_feedback_phase
+                          or args.drop_feedback_duration_ms)
+    if drop_requested:
+        if not args.sync_lift:
+            parser.error("反馈话题中断只支持 --sync-lift 本机回环")
+        if (not args.drop_feedback_topics or not args.drop_feedback_phase
+                or not np.isfinite(args.drop_feedback_duration_ms)
+                or args.drop_feedback_duration_ms <= 0):
+            parser.error("反馈中断须同时指定话题、控制阶段和正数持续时间")
 
     if args.scene and (args.network != "lo" or args.mobile or (args.lift and not args.sync_lift)):
         parser.error("--scene 只可用于本机回环的固定底盘或升降 DDS 仿真")
@@ -458,17 +530,55 @@ def main():
     subscriber.Init(bridge.accept, 1)
 
     lift_channels = []
+    feedback_phase = {"name": "before-scan", "command_seen": False,
+                      "entry_active": False, "scan_up": False, "scan_down": False}
     if args.sync_lift:
         from lift_dds import (ALARM_TOPIC, CMD_TOPIC, HEIGHT_TOPIC, VELOCITY_TOPIC,
-                              Error_, Point32_, Twist_, encode_height, vertical_twist)
+                              SIM_ZERO_GAP_M, Error_, Point32_, Twist_, encode_height,
+                              motion_twist)
+
+        base_state = {"forward": 0.0}
 
         def on_lift_command(msg):
             values = (msg.linear.x, msg.linear.y, msg.linear.z,
                       msg.angular.x, msg.angular.y, msg.angular.z)
-            if not np.isfinite(values).all() or any(values[i] != 0 for i in (0, 1, 3, 4, 5)):
+            if (not np.isfinite(values).all() or any(values[i] != 0 for i in (1, 3, 4, 5))
+                    or abs(float(msg.linear.x)) > 1.0 or abs(float(msg.linear.z)) > 1.0
+                    or (abs(float(msg.linear.x)) > 1e-6 and abs(float(msg.linear.z)) > 1e-6)):
                 bridge.set_height(0.0)
+                base_state["forward"] = 0.0
                 return
-            bridge.set_height(msg.linear.z)
+            base_state["forward"] = float(msg.linear.x)
+            command = float(msg.linear.z)
+            gap = bridge.column_pos + bridge.lift_nominal_gap
+            dds_height = gap - SIM_ZERO_GAP_M
+            feedback_phase["command_seen"] = True
+            epsilon = 1e-4
+            if abs(base_state["forward"]) > epsilon:
+                feedback_phase["name"] = "column-shift"
+            elif not feedback_phase["scan_up"]:
+                if feedback_phase["entry_active"]:
+                    if abs(command) <= epsilon:
+                        feedback_phase["entry_active"] = False
+                        feedback_phase["name"] = "before-scan"
+                    else:
+                        feedback_phase["name"] = "lift-entry"
+                elif abs(command) <= epsilon:
+                    feedback_phase["name"] = "before-scan"
+                elif abs(dds_height - 0.400) > 0.010 or command < 0:
+                    feedback_phase["entry_active"] = True
+                    feedback_phase["name"] = "lift-entry"
+                else:
+                    feedback_phase["scan_up"] = True
+                    feedback_phase["name"] = "scan-up"
+            elif command < -epsilon:
+                feedback_phase["scan_down"] = True
+                feedback_phase["name"] = "scan-down"
+            elif command > epsilon and not feedback_phase["scan_down"]:
+                feedback_phase["name"] = "scan-up"
+            elif feedback_phase["scan_down"] and dds_height <= 0.415:
+                feedback_phase["name"] = "after-scan"
+            bridge.set_height(command)
 
         lift_reader = ChannelSubscriber(CMD_TOPIC, Twist_)
         lift_reader.Init(on_lift_command, 1)
@@ -536,6 +646,8 @@ def main():
             viewer.cam.azimuth = 145
             viewer.cam.elevation = -12
     start = time.monotonic()
+    feedback_drop = FeedbackDrop(args.drop_feedback_topics, args.drop_feedback_phase,
+                                 args.drop_feedback_duration_ms, start)
     physics_due = publish_due = trace_due = viewer_due = lift_due = start
     published = 0
     lift_feedback_due = start
@@ -561,9 +673,19 @@ def main():
                 publish_due = now + 0.002
             if args.sync_lift and now >= lift_feedback_due:
                 gap = bridge.column_pos + bridge.lift_nominal_gap
-                feedback = (height_pub.Write(encode_height(gap)),
-                            alarm_pub.Write(Error_(0, int(bridge.height_limit_hits > 0))),
-                            velocity_pub.Write(vertical_twist(bridge.lift_speed / bridge.column_max_m_s)))
+                messages = (
+                    ("height", height_pub, encode_height(gap)),
+                    ("alarm", alarm_pub, Error_(0, int(bridge.height_limit_hits > 0))),
+                    ("velocity", velocity_pub,
+                     motion_twist(base_state["forward"],
+                                  bridge.lift_speed / bridge.column_max_m_s)),
+                )
+                feedback = tuple(
+                    True if feedback_drop.skip(name, now, feedback_phase["name"],
+                                                feedback_phase["command_seen"])
+                    else channel.Write(message)
+                    for name, channel, message in messages
+                )
                 if not all(feedback):
                     raise SystemExit("升降状态发送失败")
                 lift_feedback_due = now + 0.02
@@ -610,7 +732,9 @@ def main():
             signal.signal(sig, fn)
         result = bridge.report()
         result.update({"published_states": published,
-                       "wall_seconds": round(time.monotonic() - start, 2)})
+                       "wall_seconds": round(time.monotonic() - start, 2),
+                       "feedback_phase": feedback_phase["name"],
+                       "feedback_drop": feedback_drop.report(time.monotonic())})
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n",
                                encoding="utf-8")

@@ -15,8 +15,20 @@ initial_height=()
 if [ -n "${INITIAL_HEIGHT_MM:-}" ]; then
     initial_height=(--initial-lift-height-mm "$INITIAL_HEIGHT_MM")
 fi
+feedback_drop=()
+if [ -n "${DROP_TOPICS:-}" ]; then
+    if [ -z "${DROP_PHASE:-}" ] || [ -z "${DROP_DURATION_MS:-}" ]; then
+        echo "DROP_TOPICS 需要同时设置 DROP_PHASE 和 DROP_DURATION_MS" >&2
+        exit 2
+    fi
+    read -r -a drop_topics <<< "$DROP_TOPICS"
+    feedback_drop=(--drop-feedback-topics "${drop_topics[@]}"
+                   --drop-feedback-phase "$DROP_PHASE"
+                   --drop-feedback-duration-ms "$DROP_DURATION_MS")
+fi
 python3 r1d_scan/sim.py --network lo --domain "$domain" --sync-lift --scene "$scene" "${viewer[@]}" \
-    "${initial_height[@]}" --report "$output/sim.json" > "$output/sim.log" 2>&1 &
+    "${initial_height[@]}" "${feedback_drop[@]}" \
+    --report "$output/sim.json" > "$output/sim.log" 2>&1 &
 sim_pid=$!
 cleanup() {
     kill "$sim_pid" 2>/dev/null || true

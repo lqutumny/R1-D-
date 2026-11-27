@@ -2,6 +2,90 @@
 
 新方案要求机器人左侧朝箱，身体正前方与箱面平行，左手探头检测面正对箱面。底盘停稳后沿同一列竖直扫动，探头端面到箱面的名义工作距为 200 mm。先在 Ubuntu 的 `~/r1d_chassis` 开发和验证，再同步代码、模型、配置及验证说明到 Windows 工作区。跨对话安排见[项目总纲](../../AGENTS.md)。
 
+后续 DDS 稳定性、回归、真机连续运行和工程整理按[任务 01 优化任务单](TASKS.md)依次推进。
+
+一次自检和就位后持续上下往返的正式演示需求见[连续扫描演示任务](DEMO_TASK.md)。
+
+第一列上扫、顶部底盘换列、第二列下扫的现场步骤见[顶部换列 Demo](SCAN_SHIFT_DEMO.md)。
+
+## 当前状态
+
+左侧朝箱 600 mm 左臂平顺扫描已完成固定立柱仿真和真机验证。联动程序可将 300–850 mm 可信范围内的任意立柱起始高度自动调整到 400 ± 2 mm，再执行左臂 600 mm 与立柱 400→800→400 mm 同向联动。最新两轮真机均完成自动归位和完整上下扫描，实际单列覆盖分别为 997.54 mm 和 997.38 mm。一轮完整收纳并正常结束，另一轮在收纳阶段因 DDS 高度与速度反馈短暂达到 201 ms、刚超过 200 ms 保护阈值而安全停止。下一步优化瞬时 DDS 反馈超时情况下的连续运行稳定性。
+
+2026-11-27 已完成优化任务单阶段 A：联动报告新增三路 DDS 反馈健康统计和结构化超时事件，回环仿真可按话题、控制阶段和持续时间中断反馈。正常联动及四种 250 ms 收纳阶段中断共 5/5 通过，原有保护、底盘和升降柱测试合计 57/57 通过。200 ms 超时判据及安全停止行为保持不变，阶段 B 恢复逻辑尚未实施。
+
+2026-11-27 已实现正式连续扫描入口。程序只做一次自检和自动归位，随后复用现有 600 mm、单程 13.945 s 的左臂轨迹，连续执行立柱 330→830→330 mm 同向联动；循环之间不再接近、归位、自检或收纳。两循环回环仿真和一次正常停止仿真通过，真机运动尚未验证。真机只读预检曾在现场反馈不可用时安全超时退出，报告确认运动指令为 0；待机器人在线后只重做一次只读预检。
+
+2026-11-27 顶部换列Demo已完成仿真和首轮真机演示：第一列上扫至830 mm，底盘沿正 `linear.x` 前移，再在第二列下扫至330 mm并收纳。负责人确认底盘方向正确且完整流程运行成功。首轮前移1.0秒位移不明显，当前建议保持归一化命令0.05并把前移时间改为2.0秒；详细命令与快速演示取舍见 `SCAN_SHIFT_DEMO.md`。
+
+## 正式连续扫描演示（2026-11-27）
+
+端点和连续入口参数集中在 `models/continuous_demo.json`。左臂仍使用 `models/side_trial_60_51_profile.json`，未复制关节轨迹。500 mm 立柱单程在原 13.945 s 时序下所需速度高于原单轮 0.5 命令上限，因此只为连续入口把归一化命令上限设为 0.65；现有单轮程序仍为 0.5。200 ms DDS 超时、20 mm 跟踪误差、告警、关节、碰撞和端点停稳保护均未放宽。
+
+| 项目 | 状态 | 结果或证据 |
+| --- | --- | --- |
+| 两循环回环仿真 | **仿真通过** | `out/continuous_demo_sim_2cycles_retry_20261127/`。两轮各约 27.9 s；顶部 830.463/830.466 mm，底部 329.502/329.560 mm；最大立柱跟踪误差 1.62/1.44 mm；实际覆盖 1090.17/1090.18 mm；`complete=true`、收纳完成、无 DDS 过期。 |
+| 第一次 Ctrl+C 正常停止 | **仿真通过** | `out/continuous_demo_sim_ctrlc_retry_20261127/`。一次停止请求完成当时整轮后回到底部 329.528 mm并收纳；`stop_mode=ctrl-c`、`complete=true`、`fault=null`。 |
+| 快速保护回归 | **通过** | `python3 tools/fault_injection.py --unit`，15/15 通过。 |
+| 真机只读预检 | **尚未通过，零指令** | `out/continuous_demo_real_dryrun_20261127/preflight.json`。因收不到完整静止反馈而超时，`published_commands=0`；需要机器人及三路立柱 DDS 在线后重做一次。 |
+| 真机单循环、双循环、无限演示 | **尚未验证** | 必须先由现场确认，再按下面命令依次进行；当前不得直接跳到无限循环。 |
+
+仿真有限轮数：
+
+```bash
+cd ~/r1d_chassis
+NO_VIEWER=1 OUTPUT=out/continuous_demo_sim_2cycles \
+  bash run_continuous_demo_sim.sh --max-cycles 2
+```
+
+真机只读预检（不会创建运动发布器）：
+
+```bash
+cd ~/r1d_chassis
+NETWORK=ens33 DOMAIN=0 OUTPUT=out/continuous_demo_real_dryrun \
+  bash run_continuous_demo_real.sh --dry-run
+```
+
+现场确认后的一循环、两循环和无限循环入口分别为：
+
+```bash
+cd ~/r1d_chassis
+NETWORK=ens33 DOMAIN=0 bash run_continuous_demo_real.sh --conservative --max-cycles 1
+NETWORK=ens33 DOMAIN=0 bash run_continuous_demo_real.sh --max-cycles 2
+NETWORK=ens33 DOMAIN=0 bash run_continuous_demo_real.sh
+```
+
+`--conservative` 使用同一条关节轨迹，把单程时间按集中配置放大 1.5 倍，约为 20.92 s；只用于首个真机循环确认 330 mm 无干涉、830 mm 可达且保护不触发。通过后去掉该参数进入演示速度。
+
+正式入口预检通过后仍要求操作者在交互终端按一次回车。第一次 `Ctrl+C` 完成当前整轮、回到 330 mm 后收纳并出报告；第二次 `Ctrl+C` 立即按现有保护停止，升降线程结束时连续发送三次零速。明细流式写入 `arm.csv` 和 `lift.csv`，每轮摘要追加到 `cycles.jsonl`，最终汇总为 `continuous_report.json`。
+
+## 阶段 A：DDS 反馈诊断与故障注入（2026-11-27）
+
+`sync_report.json` 的 `feedback_health.topics` 分别以 `rt/height_state`、`rt/state_vel`、`rt/height_alarm` 为键，记录 `frame_count`、`interval_ms.p50/p95/p99/max`、`max_data_age_ms` 和报告结束时的 `last_data_age_ms`。`stale_events` 的每个事件记录 `topic`、`control_phase`、`t_s`、`data_age_ms`、`target_height_mm`、`actual_height_mm`、`velocity_m_s` 与 `normalized_command`；故障文本同时列出具体过期话题。
+
+正常仿真使用 650→400 mm 自动归位后完成 400→800→400 mm 联动，`complete=true`、`fault=null`、`stale_events=[]`，模型反算覆盖 989.95 mm，工作距 199.99 mm。三路反馈分别收到 3609、3609、3607 帧；最大帧间隔为 65.604、67.221、80.218 ms，最大数据年龄为 57.537、66.984、80.021 ms，均低于未改变的 200 ms 阈值。
+
+四个收纳阶段场景均配置 250 ms 中断并按原保护停止：高度 201.113 ms、速度 200.108 ms、告警 204.985 ms；高度与速度同时中断时分别在 206.595/204.755 ms 被同一轮检测。所有事件阶段均为 `after-scan`，立柱目标 400 mm、归一化命令 0。统一报告位于 Ubuntu `out/stage_a_20261127_final/summary.json`，通过 5/5；原有 `run_fault_tests.sh` 30/30、`tools/test_chassis.py` 13/13、`tools/test_lift.py` 14/14。
+
+完整阶段 A 矩阵：
+
+```bash
+cd ~/r1d_chassis
+PYTHONDONTWRITEBYTECODE=1 python3 tools/test_feedback_diagnostics.py \
+  --output out/stage_a_feedback_$(date +%Y%m%d_%H%M%S)
+```
+
+单独注入时可把 `DROP_TOPICS` 设为 `height`、`velocity`、`alarm` 或 `"height velocity"`：
+
+```bash
+cd ~/r1d_chassis
+NO_VIEWER=1 INITIAL_HEIGHT_MM=650 \
+OUTPUT=out/stage_a_height DROP_TOPICS=height \
+DROP_PHASE=after-scan DROP_DURATION_MS=250 bash run_sync_sim.sh
+```
+
+注入场景按设计返回退出码 2，表示现有 200 ms 安全停止已触发；不是仿真器崩溃。阶段 A 只增加诊断和测试能力，未增加超时恢复，也未提高阈值。
+
 ## 左侧朝箱改造阶段
 
 | 阶段 | 验收结果 |
